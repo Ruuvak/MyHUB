@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ui-vite",
+      "runtimeExecutable": "C:\\Users\\creva\\.bun\\bin\\bun.exe",
+      "runtimeArgs": ["run", "dev"],
+      "port": 1420
+    }
+  ]
+}

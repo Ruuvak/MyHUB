@@ -1,0 +1,122 @@
+# F4 IPC contract (Rust <-> UI). JSON is camelCase; enums are lowercase/camelCase strings as written.
+
+## Types
+DeviceSummary {
+  id: string                      // stable, no serial numbers. G502 X: "logitech-g502x"
+  name: string                    // "G502 X LIGHTSPEED"
+  kind: "mouse" | "keyboard" | "headset" | "gamepad"
+  connection: "connected" | "disconnected"   // disconnected = paired but switched off / asleep (HID++ 1.0 0x41 link down)
+  batteryPercent: number | null
+}
+
+DeviceDetail = DeviceSummary & {
+  vendor: string                  // "Logitech"
+  transport: string               // "LIGHTSPEED"
+  protocol: string                // "HID++ 2.0"
+  readOnly: boolean               // true in F4 (no Set* calls exist yet)
+  updatedAtMs: number             // unix ms of the last successful read
+  illustration: string | null     // UI illustration key, "g502x" for this mouse
+  battery: { percent: number } | null
+  dpi: { min: number; max: number; step: number; current: number } | null
+  reportRate: { optionsHz: number[]; currentHz: number } | null
+  onboard: {
+    mode: "host" | "onboard" | null          // 0x8100 fn2: 2 host, 1 onboard, else null
+    activeProfile: number | null             // 0x8100 fn4 sector 0x0001..0x0005 -> 1..5, else null
+    buttonCount: number                      // from 0x8100 info (11)
+    profiles: ProfileInfo[]                  // user profiles 1..N, then ROM profiles
+  } | null
+}
+
+ProfileInfo {
+  id: string                      // "user-1".."user-5", "rom-1", "rom-2"
+  number: number                  // 1..5 for user, 1..2 for rom
+  rom: boolean
+  enabled: boolean                // from directory sector 0x0000 (ROM: true)
+  name: string | null             // UTF-16 name when present
+  reportRateHz: number | null     // 1000 / interval byte (1,2,4,8 ms), null if invalid
+  dpiLevels: number[]             // 5 values
+  defaultDpiIndex: number
+  shiftDpiIndex: number
+  buttons: BindingInfo[]          // only the first buttonCount slots
+  gshift: BindingInfo[]           // only the first buttonCount slots
+  crcOk: boolean                  // ROM sectors store CRC 0, report crcOk=false but still show
+}
+
+BindingInfo {
+  slot: number                    // 0-based slot index; label in UI is "G{slot+1}"
+  kind: "mouse" | "keyboard" | "consumer" | "special" | "unassigned" | "unknown"
+  mouseButtons: number | null     // bitmask: 0x01 left, 0x02 right, 0x04 middle, 0x08 back, 0x10 forward
+  modifiers: number | null        // HID modifier bitmask (0x01 LCtrl, 0x02 LShift, 0x04 LAlt, 0x08 LGui, 0x10 RCtrl, 0x20 RShift, 0x40 RAlt, 0x80 RGui)
+  usage: number | null            // keyboard: HID keyboard usage; consumer: consumer usage
+  special: "wheelLeft" | "wheelRight" | "dpiUp" | "dpiDown" | "dpiShift" | "profileCycle" | "gShift" | null
+  specialCode: number | null      // raw special code, also set for unknown specials (0x10, 0x11 are [UNK])
+  rawHex: string                  // the 4 raw bytes, e.g. "90070000"
+}
+
+## Commands (Tauri invoke)
+list_devices() -> DeviceSummary[]
+get_device_detail({ id }) -> DeviceDetail | null
+refresh_device({ id }) -> DeviceDetail | null     // re-reads the device now (read tier only)
+open_main_window({ deviceId?: string })           // shows + focuses main window, optionally selects device (emits "select-device" with id)
+hide_flyout()
+(existing: app_info, get_settings, set_settings)
+
+## Events
+"devices-changed"        payload DeviceSummary[]
+"device-detail-changed"  payload DeviceDetail
+"select-device"          payload string (device id), sent to the main window
+"settings-changed"       payload Settings (existing)
+
+## F5 additions (volatile settings, route a)
+Settings gains: allowDeviceWrites: boolean (default false), restoreOnConnect: boolean (default false).
+DeviceDetail.readOnly = !(settings.allowDeviceWrites && connected). The mode is not part of it.
+Host mode: a write while onboard.mode == "onboard" first switches the mouse to host (0x8100 fn1, verified), then writes; onboard.mode then shows "host". If the switch fails the error is "notHostMode". The app returns the mouse to onboard (best effort, one attempt) when allowDeviceWrites is turned off, on quit and on shutdown, but only if it switched it to host itself. If the mouse resets to onboard on its own (link-up), the app forgets it switched it.
+New commands:
+set_dpi({ id, dpi }) -> DeviceDetail          // error string on refusal/failure
+set_report_rate({ id, hz }) -> DeviceDetail   // hz in reportRate.optionsHz
+get_device_prefs({ id }) -> DevicePrefs | null
+DevicePrefs { dpi: number | null; reportRateHz: number | null }   // last values the user applied, stored on the PC
+Errors (string codes): "writesDisabled", "notHostMode", "disconnected", "outOfRange", "verifyFailed", "deviceError:<code>".
+<code> is the HID++ error code in decimal ("deviceError:2") or one of the words "encode", "parse", "policy", "session", "timeout" ("timeout" = the worker did not run the command within 10 s, nothing was sent).
+Rules: writes run in the worker one at a time with at least 250 ms between writes to one device; get_device_prefs only answers for known device ids.
+
+## Stage 6 additions (onboard profile save, battery status)
+DeviceDetail.battery becomes { percent: number; level: "full"|"good"|"low"|"critical"|null; charging: "discharging"|"charging"|"almostFull"|"full"|"slowCharging"|"error"|"unknown"; externalPower: boolean } | null
+  // from 0x1004 fn1 bytes 0..3 (Solaar names); externalPower = byte3 != 0 [INF]. UI shows the charging word first while externalPower or charging != discharging, percent labelled as reported by the mouse.
+DeviceDetail.onboard gains: writableProfile: number | null   // active profile number (3..5) when it is enabled, mode is onboard and the sector is in the write allowlist; else null
+New command:
+save_profile_to_mouse({ id, dpiLevels?: number[5], defaultDpiIndex?: number, shiftDpiIndex?: number, reportRateHz?: number }) -> { detail: DeviceDetail; outcome: "written" | "unchanged"; backupPath: string | null }
+Rules: requires settings.allowDeviceWrites and connected; target = active profile only if onboard.writableProfile != null (never 0x0001/0x0002, never the directory); runs in the worker with the existing write rules; backup of the target sector to <app_data>/backups/<deviceId>/<utc timestamp>_sector_<hex>.json before any frame (keep the newest 50); identical image = no write; after a write the worker re-selects the same profile via fn3 and re-reads the detail [INF: the mouse may not reload the active sector otherwise].
+New error codes: "profileNotWritable", "notOnboardMode", "backupFailed", "flashWriteFailed:<restored|restoreFailed|notNeeded|unknown>", "savedReselectFailed". "flashWriteFailed:unknown" = the link was lost mid-sequence or no restore was possible, sector state unknown, re-read before any further write. "savedReselectFailed:<active sector as 0x000N, or unknown>" = the new values are on the flash but the reload (switch to another profile and back) did not end on the saved profile; the suffix says which profile the mouse is on now. The save result gains reloaded: boolean; when false (no other enabled profile) the new values apply after a profile switch. A save that times out on the caller side ("deviceError:timeout") means state unknown, never "nothing written"; the UI re-reads. A request the mouse cannot take (levels not 5, rate not 1000/500/250/125, DPI not allowed, index above 4, level 0) is "outOfRange" before any frame. The backup path is returned for "unchanged" too (the backup is taken before the comparison). Backup JSON: sector is a number. Pruning keeps the newest 50 per device plus the oldest backup of each sector forever.
+UI: the DPI and rate editors stage edits locally; "Zapisz na mysz" is the only action that writes flash, enabled only when writableProfile != null and there are changes. No write on slider drag.
+
+## Temporary mode (HOST) behind an explicit switch (user decision 2026-10-15, replaces the lazy host switch)
+- Default is the onboard profile. The app never enters HOST on its own: no lazy switch in set_dpi/set_report_rate, and nothing on app start or connect.
+- New commands: enter_temporary_mode({ id }) -> DeviceDetail (requires allowDeviceWrites and connected; switches to host via 0x8100 fn1 02 and verifies, sets the host mark); leave_temporary_mode({ id }) -> DeviceDetail (explicit user action: if fn2 reads host, return to onboard and verify even without the mark; no-op success when already onboard; errors "disconnected" when the outcome is unknown, "verifyFailed" when the mouse stayed in host).
+- set_dpi / set_report_rate: only while the mouse is in host mode and the host mark is set (we entered it), else "notHostMode". No implicit switch.
+- restoreOnConnect: only re-applies the stored temporary values after a link-up while temporary mode is active (mark set) in this app run. Never enters host by itself. Default false.
+- Turning allowDeviceWrites off, quitting, or shutdown still returns to onboard when the mark is set.
+- UI: the performance tab shows only the onboard profile editor by default. A separate "Tryb tymczasowy" card has a button "Włącz tryb tymczasowy" with the warning that the mouse buttons, profiles and LEDs stop working until it is left. While onboard.mode == "host", a clear banner "Tryb tymczasowy (HOST): przyciski i diody myszy wyłączone" with "Wróć do profilu" shows in the main window and the flyout; the temporary DPI and rate editors show only then. The restoreOnConnect option lives inside the temporary mode card.
+
+## Windows
+"main"   existing window.
+"flyout" frameless, transparent, 380x640, not resizable, skip taskbar, always on top, hidden by default, same frontend (index.html).
+         The UI detects it with getCurrentWindow().label === "flyout" and renders the compact card.
+         Hides itself when it loses focus. Positioned above the tray icon (bottom right on Windows).
+
+## Mode naming and autostart (user decision 2026-10-15)
+- Both modes are equal. Names: onboard = "Profil w myszy", host = "Sterowanie z aplikacji". No warning colours or warning banners for host; a neutral info line says what the mouse does and what the app does in the current mode (host today: the app sets DPI and report rate; mouse buttons other than left/right, profiles and LEDs are not handled yet). A plain segmented mode switch replaces "Włącz tryb tymczasowy" / "Wróć do profilu" (calls enter_temporary_mode / leave_temporary_mode).
+- Settings gains launchAtLogin: boolean (default true). Backed by tauri-plugin-autostart (Windows registry Run key, Linux XDG autostart .desktop). A launch from autostart passes "--autostart" and starts hidden in the tray, whatever startMinimized says.
+
+## DPI buttons in app control mode (user decision 2026-10-15)
+- enter_temporary_mode: after the verified switch to host, the worker starts the 0x8110 button spy (fn1). Every path that leaves host (leave_temporary_mode, writes off, quit, shutdown, last-resort return, save that returns to onboard) stops the spy (fn2) first, then sends 0x8100 fn1 01. Leave without the mark also sends a spy stop first (harmless if not running).
+- Spy notifications (0x8110 fn0, bytes 0..1 LE u16): on a press edge of bit1 (DPI up) or bit2 (DPI down), the worker picks the next higher / lower level from the levels of the profile that was active before host was entered (remembered at enter; fall back to the snapshot's active user profile), clamped at the ends, and applies it with the existing set_dpi path (rate limit; if presses come faster, the latest target wins). It updates dpi.current and emits device-detail-changed. Other bits are ignored for now.
+- After a link-up while the mark is set, the spy is started again.
+- UI info line in app control mode: "Przyciski DPI na myszy przełączają poziomy profilu {n}."
+
+## Restore last mode at start (user decision 2026-10-15, replaces restoreOnConnect)
+- Settings: restoreLastMode: boolean, default true. restoreOnConnect is removed (an old settings file with it still loads; the old field is ignored).
+- DevicePrefs gains mode: "onboard" | "host" (default "onboard"). enter_temporary_mode stores "host", leave_temporary_mode stores "onboard". set_dpi / set_report_rate keep storing dpi / reportRateHz (the app-control values). Turning writes off, quit and shutdown return the mouse to onboard but do not change the stored mode.
+- On the first successful read after app start, and after each link-up: if restoreLastMode && allowDeviceWrites && prefs.mode == "host", the worker enters app control (host switch + spy, same path as enter_temporary_mode) and applies the stored dpi and reportRateHz. Otherwise nothing is sent.
+- Shutdown and quit still return the mouse to onboard, so it works before the app starts.
+- UI: Settings switch "Przywracaj ostatni tryb po starcie" (hint: "Po starcie aplikacja wraca do ostatniego trybu i ustawień DPI."). The restoreOnConnect toggle in the app-control card is removed.

@@ -1,0 +1,12 @@
+/target
+node_modules/
+dist/
+src-tauri/gen/
+*.local
+
+# Claude Design export, already unpacked into assets/design
+MyHUB visual asset set.zip
+
+# Per-machine Claude Code state
+.claude/settings.local.json
+.claude/agent-memory/

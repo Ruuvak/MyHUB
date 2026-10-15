@@ -1,0 +1,20 @@
+[package]
+name = "myhub-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hidapi.workspace = true
+hidpp.workspace = true
+thiserror.workspace = true
+
+# Pure-Rust backends (no bundled C hidapi). The workspace entry disables the
+# default features, so the backend is chosen per target here.
+[target.'cfg(windows)'.dependencies]
+hidapi = { workspace = true, features = ["windows-native"] }
+
+# hidraw through the udev crate; needs libudev (headers + pkg-config) at build time.
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { workspace = true, features = ["linux-native"] }

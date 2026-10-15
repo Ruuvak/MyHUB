@@ -1,0 +1,26 @@
+[package]
+name = "myhub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "myhub_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+sys-locale = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+myhub-core = { workspace = true }
+myhub-transport = { workspace = true }
+logitech-g502x = { workspace = true }
+hidpp = { workspace = true }
+tauri-plugin-autostart = "2"

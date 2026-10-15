@@ -1,0 +1,107 @@
+/* Design tokens. One palette, cool neutrals, a single accent. Theme is chosen by data-theme on <html>. */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e0f11;
+  --surface: #16181b;
+  --surface-2: #1d2024;
+  --border: #2a2e33;
+  --text: #e8eaed;
+  --text-muted: #9aa1a9;
+  --text-faint: #6b727a;
+  --accent: #4fd1a5;
+  --accent-fg: #06251b;
+  --danger: #f26d6d;
+  --warning: #e8b341;
+  /* No shadows in dark. */
+  --float-shadow: none;
+  /* Strength of the accent glow behind device illustrations. */
+  --glow-strength: 18%;
+  /* Illustration palette and logo ink, used by the SVG artwork in src/assets/design. */
+  --illu-body: #1d2024;
+  --illu-body-shade: #16181b;
+  --illu-line: #6b727a;
+  --illu-part: #2a2e33;
+  --illu-part-shade: #16181b;
+  --illu-highlight: #4fd1a5;
+  --illu-shadow: #0e0f11;
+  --logo-ink: #e8eaed;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f2;
+  --border: #dde1e5;
+  --text: #15181c;
+  --text-muted: #59616b;
+  --text-faint: #8a929b;
+  --accent: #0b7f5e;
+  --accent-fg: #ffffff;
+  --danger: #c43d3d;
+  --warning: #9a6a00;
+  /* The single shadow token, tinted, for floating elements only. */
+  --float-shadow: 0 1px 3px rgb(21 24 28 / 0.14);
+  --glow-strength: 10%;
+  --illu-body: #eef0f2;
+  --illu-body-shade: #dde1e5;
+  --illu-line: #8a929b;
+  --illu-part: #ffffff;
+  --illu-part-shade: #dde1e5;
+  --illu-highlight: #0b7f5e;
+  --illu-shadow: #dde1e5;
+  --logo-ink: #15181c;
+}
+
+/* Motion tokens. */
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-press: 120ms;
+  --dur-fast: 160ms;
+  --dur-base: 200ms;
+}
+
+/* Tailwind mapping. Reset the default scales so only this system is available. */
+@theme inline {
+  --color-*: initial;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-transparent: transparent;
+  --color-current: currentColor;
+
+  --radius-*: initial;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --radius-pill: 9999px;
+
+  --shadow-*: initial;
+  --shadow-float: var(--float-shadow);
+
+  --font-sans: "Geist Variable", system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+
+  --text-*: initial;
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 18px;
+  --text-base: 14px;
+  --text-base--line-height: 20px;
+  --text-lg: 16px;
+  --text-lg--line-height: 24px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 28px;
+  --text-2xl--line-height: 36px;
+}
