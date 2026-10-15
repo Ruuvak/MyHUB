@@ -16,6 +16,9 @@ const TRAY_ID: &str = "main";
 const ID_FLYOUT: &str = "flyout";
 const ID_SHOW: &str = "show";
 pub const ID_DEVICES_STATUS: &str = "devices-status";
+const ID_SECOND_STATUS: &str = "devices-status-2";
+/// Menu index of the second status line: after flyout, show and the first status line.
+const SECOND_STATUS_POSITION: usize = 3;
 const ID_QUIT: &str = "quit";
 
 /// Battery level at or below which the tray shows the low battery icon.
@@ -126,6 +129,10 @@ pub struct TrayState {
     flyout: MenuItem<tauri::Wry>,
     show: MenuItem<tauri::Wry>,
     devices_status: MenuItem<tauri::Wry>,
+    /// Second status line (headset); in the menu only while `second_shown`.
+    second_status: MenuItem<tauri::Wry>,
+    second_shown: Mutex<bool>,
+    menu: Menu<tauri::Wry>,
     quit: MenuItem<tauri::Wry>,
     /// Text set by the device layer; `None` means the localized "No devices".
     devices_text: Mutex<Option<String>>,
@@ -139,6 +146,33 @@ impl TrayState {
         self.devices_text
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Main thread only: sets the second status line, inserting its item under the first line
+    /// when it is not in the menu yet, or removing it when `text` is `None`.
+    fn show_second(&self, text: Option<&str>) {
+        let mut shown = self
+            .second_shown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match text {
+            Some(text) => {
+                let _ = self.second_status.set_text(text);
+                if !*shown
+                    && self
+                        .menu
+                        .insert(&self.second_status, SECOND_STATUS_POSITION)
+                        .is_ok()
+                {
+                    *shown = true;
+                }
+            }
+            None => {
+                if *shown && self.menu.remove(&self.second_status).is_ok() {
+                    *shown = false;
+                }
+            }
+        }
     }
 
     fn lock_icon(&self) -> MutexGuard<'_, IconChoice> {
@@ -162,6 +196,9 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
     let flyout = MenuItemBuilder::with_id(ID_FLYOUT, t.flyout).build(app)?;
     let show = MenuItemBuilder::with_id(ID_SHOW, t.show).build(app)?;
     let devices_status = MenuItemBuilder::with_id(ID_DEVICES_STATUS, t.no_devices)
+        .enabled(false)
+        .build(app)?;
+    let second_status = MenuItemBuilder::with_id(ID_SECOND_STATUS, "")
         .enabled(false)
         .build(app)?;
     let quit = MenuItemBuilder::with_id(ID_QUIT, t.quit).build(app)?;
@@ -209,6 +246,9 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
         flyout,
         show,
         devices_status,
+        second_status,
+        second_shown: Mutex::new(false),
+        menu,
         quit,
         devices_text: Mutex::new(None),
         icon: Mutex::new(choice),
@@ -230,9 +270,11 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     }
 }
 
-/// For the device layer: sets the text of the disabled `devices-status` item,
-/// or restores the localized "No devices" with `None`. No-op without a tray.
-pub fn set_devices_status(app: &AppHandle, text: Option<String>) {
+/// For the device layer: sets the text of the disabled `devices-status` item
+/// (or restores the localized "No devices" with `None`) and of the second line
+/// below it. The second item sits in the menu only while `second` is `Some`.
+/// No-op without a tray.
+pub fn set_devices_status(app: &AppHandle, text: Option<String>, second: Option<String>) {
     let Some(state) = app.try_state::<TrayState>() else {
         return;
     };
@@ -245,10 +287,14 @@ pub fn set_devices_status(app: &AppHandle, text: Option<String>) {
     };
     *state.lock_text() = text;
     // Posted, not awaited: the caller is the device worker, which must not
-    // block on the main thread.
+    // block on the main thread. The posts run in order, each with its own values.
     let item = state.devices_status.clone();
+    let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let _ = item.set_text(shown);
+        if let Some(state) = handle.try_state::<TrayState>() {
+            state.show_second(second.as_deref());
+        }
     });
 }
 

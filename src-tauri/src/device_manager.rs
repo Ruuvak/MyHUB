@@ -36,7 +36,7 @@ use logitech_g502x::{
     SectorWriteError, Snapshot, WriteError, onboard_mode, parse_battery_status, read_snapshot,
     save_active_profile, set_dpi, set_onboard_mode, set_report_rate, to_detail,
 };
-use myhub_core::{Connection, DeviceDetail, DevicePrefs, DeviceSummary, OnboardMode};
+use myhub_core::{CellCharging, Connection, DeviceDetail, DevicePrefs, DeviceSummary, OnboardMode};
 use myhub_transport::{
     ErrorFamily, HidApi, HidLink, HidapiLink, HidapiSession, HidppSession, SessionError,
     connection_notification, find_receivers,
@@ -146,9 +146,9 @@ impl ManagerState {
             .cloned()
     }
 
-    /// The device the tray shows: the G502 while it is known, else the headset.
-    fn tray_detail(&self) -> Option<DeviceDetail> {
-        self.detail.clone().or_else(|| self.sony.clone())
+    /// The details the tray shows: the G502 and the headset.
+    fn tray_details(&self) -> (Option<DeviceDetail>, Option<DeviceDetail>) {
+        (self.detail.clone(), self.sony.clone())
     }
 }
 
@@ -497,8 +497,8 @@ impl DeviceManager {
 
     /// Re-applies the tray status text, e.g. after a language change.
     pub fn refresh_tray(&self, app: &AppHandle) {
-        let detail = lock(&self.state).tray_detail();
-        update_tray(app, detail.as_ref());
+        let (mouse, headset) = lock(&self.state).tray_details();
+        update_tray(app, mouse.as_ref(), headset.as_ref());
     }
 
     /// Stops the worker and waits a short while for it to finish. The wait is
@@ -558,8 +558,68 @@ pub fn status_text(detail: Option<&DeviceDetail>, language: Language) -> Option<
     )
 }
 
-fn update_tray(app: &AppHandle, detail: Option<&DeviceDetail>) {
-    tray::set_devices_status(app, status_text(detail, tray::current_language(app)));
+/// Tray status line for the headset: `WF-C710N: L 100% · P 100% · etui 70%` (English:
+/// `L · R · case`), a cell that charges gets ` (ładowanie)` / ` (charging)`, a cell not
+/// reported is left out; `WF-C710N: rozłączone` / `WF-C710N: disconnected` while
+/// disconnected; `None` without a headset.
+pub fn headset_status_text(detail: Option<&DeviceDetail>, language: Language) -> Option<String> {
+    let detail = detail?;
+    let name = short_name(&detail.summary.name);
+    if detail.summary.connection == Connection::Disconnected {
+        return Some(match language {
+            Language::Pl => format!("{name}: rozłączone"),
+            _ => format!("{name}: disconnected"),
+        });
+    }
+    let Some(battery) = detail.headset.as_ref().and_then(|h| h.battery) else {
+        return Some(name.to_owned());
+    };
+    let (right, case, charging) = match language {
+        Language::Pl => ("P", "etui", " (ładowanie)"),
+        _ => ("R", "case", " (charging)"),
+    };
+    let parts: Vec<String> = [
+        ("L", battery.left),
+        (right, battery.right),
+        (case, battery.case),
+    ]
+    .into_iter()
+    .filter_map(|(label, cell)| {
+        let cell = cell?;
+        let suffix = if cell.charging == CellCharging::Charging {
+            charging
+        } else {
+            ""
+        };
+        Some(format!("{label} {}%{suffix}", cell.percent))
+    })
+    .collect();
+    Some(if parts.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}: {}", parts.join(" · "))
+    })
+}
+
+/// The two tray status lines. With a mouse: the mouse line, then the headset line when there is
+/// one. Without a mouse the headset line is the only (first) line.
+pub fn tray_lines(
+    mouse: Option<&DeviceDetail>,
+    headset: Option<&DeviceDetail>,
+    language: Language,
+) -> (Option<String>, Option<String>) {
+    let headset_line = headset_status_text(headset, language);
+    match status_text(mouse, language) {
+        Some(mouse_line) => (Some(mouse_line), headset_line),
+        None => (headset_line, None),
+    }
+}
+
+fn update_tray(app: &AppHandle, mouse: Option<&DeviceDetail>, headset: Option<&DeviceDetail>) {
+    let (first, second) = tray_lines(mouse, headset, tray::current_language(app));
+    tray::set_devices_status(app, first, second);
+    // The icon follows the mouse while it is known, else the headset.
+    let detail = mouse.or(headset);
     tray::set_look(
         app,
         tray::look_for(detail.map(|d| (d.summary.connection, d.summary.battery_percent))),
@@ -2680,7 +2740,7 @@ pub(crate) fn publish_slot(
         let mut state = lock(state);
         let change = changes(state.slot_mut(slot).as_ref(), detail.as_ref());
         *state.slot_mut(slot) = detail.clone();
-        (change, state.summaries(), state.tray_detail())
+        (change, state.summaries(), state.tray_details())
     };
     if stopping {
         return;
@@ -2697,7 +2757,7 @@ pub(crate) fn publish_slot(
         eprintln!("myhub: cannot emit {DEVICE_DETAIL_CHANGED_EVENT}: {e}");
     }
     if change.summaries || change.detail {
-        update_tray(app, tray.as_ref());
+        update_tray(app, tray.0.as_ref(), tray.1.as_ref());
     }
 }
 
@@ -3163,17 +3223,61 @@ mod tests {
             Some(55)
         );
         assert!(state.find("nope").is_none());
-        // The tray follows the G502 while it is known, else the headset.
-        assert_eq!(state.tray_detail().unwrap().summary.id, DEVICE_ID);
+        // The tray gets both details.
+        let (mouse, headset) = state.tray_details();
+        assert_eq!(mouse.unwrap().summary.id, DEVICE_ID);
+        assert_eq!(headset.unwrap().summary.id, sony_wf_c710n::DEVICE_ID);
         *state.slot_mut(Slot::Logitech) = None;
+        assert!(state.tray_details().0.is_none());
+    }
+
+    #[test]
+    fn tray_lines_for_mouse_and_headset() {
+        use myhub_core::{HeadsetBattery, HeadsetCell, HeadsetView};
+        let cell = |percent, charging| Some(HeadsetCell { percent, charging });
+        let mut headset = detail_for(Connection::Connected, Some(100));
+        headset.summary.name = "WF-C710N".to_owned();
+        headset.headset = Some(HeadsetView {
+            battery: Some(HeadsetBattery {
+                left: cell(100, CellCharging::NotCharging),
+                right: cell(100, CellCharging::Charging),
+                case: cell(70, CellCharging::Charged),
+            }),
+            nc_asm: None,
+            eq: None,
+            multipoint: None,
+            sidetone: None,
+            codec: None,
+            firmware: None,
+        });
+        let line = |d: &DeviceDetail, l| headset_status_text(Some(d), l).unwrap();
         assert_eq!(
-            state.tray_detail().unwrap().summary.id,
-            sony_wf_c710n::DEVICE_ID
+            line(&headset, Language::Pl),
+            "WF-C710N: L 100% · P 100% (ładowanie) · etui 70%"
         );
         assert_eq!(
-            status_text(state.tray_detail().as_ref(), Language::En).as_deref(),
-            Some("WF-C710N: 80%")
+            line(&headset, Language::En),
+            "WF-C710N: L 100% · R 100% (charging) · case 70%"
         );
+        if let Some(b) = headset.headset.as_mut().and_then(|h| h.battery.as_mut()) {
+            b.right = None;
+        }
+        assert_eq!(line(&headset, Language::En), "WF-C710N: L 100% · case 70%");
+        let mut off = headset.clone();
+        off.summary.connection = Connection::Disconnected;
+        assert_eq!(line(&off, Language::Pl), "WF-C710N: rozłączone");
+        assert_eq!(line(&off, Language::En), "WF-C710N: disconnected");
+
+        let mouse = detail_for(Connection::Connected, Some(55));
+        let en = Language::En;
+        let (first, second) = tray_lines(Some(&mouse), Some(&headset), en);
+        assert_eq!(first.as_deref(), Some("G502 X: 55%"));
+        assert_eq!(second.as_deref(), Some("WF-C710N: L 100% · case 70%"));
+        let (first, second) = tray_lines(None, Some(&headset), en);
+        assert_eq!(first.as_deref(), Some("WF-C710N: L 100% · case 70%"));
+        assert_eq!(second, None);
+        assert_eq!(tray_lines(Some(&mouse), None, en).1, None);
+        assert_eq!(tray_lines(None, None, en), (None, None));
     }
 
     #[test]

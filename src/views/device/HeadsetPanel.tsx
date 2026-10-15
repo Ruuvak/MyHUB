@@ -282,6 +282,8 @@ export function Equalizer({
   const t = useT();
   const language = useLanguage();
   const [draft, setDraft] = useState<number[] | null>(null);
+  // "Saved" stays visible after a confirmed write until the next edit.
+  const [saved, setSaved] = useState(false);
   const bandsKey = eq.bands.join(",");
   const bands = draft ?? eq.bands;
   const dirty = draft !== null && draft.join(",") !== bandsKey;
@@ -294,6 +296,7 @@ export function Equalizer({
   const split = splitBands(eq);
 
   function setBand(index: number, step: number) {
+    setSaved(false);
     setDraft((d) => {
       const next = [...(d ?? eq.bands)];
       next[index] = step;
@@ -403,7 +406,11 @@ export function Equalizer({
           className="disabled:cursor-default disabled:border disabled:border-border disabled:bg-surface-2 disabled:text-text-faint disabled:opacity-60"
           disabled={disabled || !dirty}
           onClick={() => {
-            if (draft) void onSaveBands(draft);
+            if (!draft) return;
+            setSaved(false);
+            void onSaveBands(draft).then((ok) => {
+              if (ok) setSaved(true);
+            });
           }}
         >
           {t("headset.eq.save")}
@@ -411,6 +418,11 @@ export function Equalizer({
         <Button variant="secondary" size="sm" disabled={disabled || !dirty} className="disabled:cursor-default disabled:border disabled:border-border disabled:bg-surface-2 disabled:text-text-faint disabled:opacity-60" onClick={() => setDraft(null)}>
           {t("headset.eq.revert")}
         </Button>
+        {saved && !dirty ? (
+          <span role="status" className="text-sm text-text-muted">
+            {t("headset.eq.saved")}
+          </span>
+        ) : null}
       </div>
       <p className="text-sm text-text-muted">{t("headset.eq.hint")}</p>
     </div>

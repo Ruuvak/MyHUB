@@ -270,6 +270,7 @@ export const pl: Messages = {
   "headset.ambient.mode": "Tryb dźwięku otoczenia",
   "headset.eq.preset": "Ustawienie korektora",
   "headset.eq.save": "Zapisz",
+  "headset.eq.saved": "Zapisano w słuchawkach",
   "headset.eq.revert": "Cofnij",
   "headset.eq.hint": "Zapis pasm przełącza na korektor Własny.",
   "headset.multipoint.confirm": "Słuchawki na chwilę rozłączą się i połączą ponownie. Inne urządzenia połączone ze słuchawkami mogą zostać rozłączone.",

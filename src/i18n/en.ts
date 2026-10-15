@@ -268,6 +268,7 @@ export const en = {
   "headset.ambient.mode": "Ambient sound mode",
   "headset.eq.preset": "Equalizer preset",
   "headset.eq.save": "Save",
+  "headset.eq.saved": "Saved to the headset",
   "headset.eq.revert": "Undo",
   "headset.eq.hint": "Saving the bands switches to the Custom equalizer.",
   "headset.multipoint.confirm": "The headset will disconnect briefly and reconnect. Other devices connected to the headset may be disconnected.",
