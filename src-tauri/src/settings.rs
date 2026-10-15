@@ -465,6 +465,7 @@ mod tests {
             dpi: Some(1200),
             report_rate_hz: Some(500),
             mode: myhub_core::OnboardMode::Host,
+            profile: Some(3),
         };
         save_prefs(&path, &prefs).unwrap();
         assert!(!path.with_file_name("logitech-g502x.json.tmp").exists());

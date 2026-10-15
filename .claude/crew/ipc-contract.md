@@ -118,6 +118,7 @@ UI: the DPI and rate editors stage edits locally; "Zapisz na mysz" is the only a
 - Settings: restoreLastMode: boolean, default true. restoreOnConnect is removed (an old settings file with it still loads; the old field is ignored).
 - DevicePrefs gains mode: "onboard" | "host" (default "onboard"). enter_temporary_mode stores "host", leave_temporary_mode stores "onboard". set_dpi / set_report_rate keep storing dpi / reportRateHz (the app-control values). Turning writes off, quit and shutdown return the mouse to onboard but do not change the stored mode.
 - On the first successful read after app start, and after each link-up: if restoreLastMode && allowDeviceWrites && prefs.mode == "host", the worker enters app control (host switch + spy, same path as enter_temporary_mode) and applies the stored dpi and reportRateHz. Otherwise nothing is sent.
+- DevicePrefs.profile (optional, 1..=5) stores the profile sector of app control, written by enter; in app control (the mouse reads fn4 = 0) onboard.activeProfile shows that profile, and the restore uses it when the mouse was already in host mode at start. Onboard reads are never overlaid.
 - Shutdown and quit still return the mouse to onboard, so it works before the app starts.
 - UI: Settings switch "Przywracaj ostatni tryb po starcie" (hint: "Po starcie aplikacja wraca do ostatniego trybu i ustawień DPI."). The restoreOnConnect toggle in the app-control card is removed.
 

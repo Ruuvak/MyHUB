@@ -916,7 +916,13 @@ fn enter_and_store<L: HidLink>(
 ) -> Result<(), WriteFailure> {
     device.enter_temporary(id, allow_writes, Some(deadline))?;
     if let Some(path) = prefs_path {
-        update_prefs(path, |prefs| prefs.mode = OnboardMode::Host);
+        let profile = device.remembered_profile;
+        update_prefs(path, |prefs| {
+            prefs.mode = OnboardMode::Host;
+            if profile.is_some() {
+                prefs.profile = profile;
+            }
+        });
     }
     Ok(())
 }
@@ -1355,6 +1361,7 @@ impl<L: HidLink> Device<L> {
                 // again once the snapshot is stored.
                 self.spy_restart_due |= connect && self.host_by_us();
                 self.snapshot = Some(snapshot);
+                self.apply_host_overlay();
                 self.link_up = true;
                 self.updated_at_ms = clock_ms();
                 self.last_battery = now;
@@ -1539,6 +1546,25 @@ impl<L: HidLink> Device<L> {
         u16::from_str_radix(hex.get(0..4)?, 16).ok()
     }
 
+    /// In app control the mouse answers fn4 with 0; the profile that was active
+    /// when app control began stands in for it. Only while the mouse reads host
+    /// mode and this app holds the mark: onboard reads are never touched.
+    fn apply_host_overlay(&mut self) {
+        if !self.host_by_us() || snapshot_mode_byte_of(self) != Some(2) {
+            return;
+        }
+        let Some(sector) = self.remembered_profile else {
+            return;
+        };
+        if self.active_sector().unwrap_or(0) != 0 {
+            return;
+        }
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.onboard.active_profile_raw_hex = Some(format!("{sector:04x}0000"));
+            snapshot.onboard.active_profile_error = None;
+        }
+    }
+
     /// Sets the current DPI to level `index` of `sector`'s profile when that
     /// level exists and is non-zero. `true` when it was applied.
     fn set_dpi_level(&mut self, sector: u16, index: Option<usize>) -> bool {
@@ -1599,6 +1625,7 @@ impl<L: HidLink> Device<L> {
                 eprintln!("myhub: confirm read failed: {e}");
             }
         }
+        self.apply_host_overlay();
         self.updated_at_ms = clock_ms();
         self.dirty = true;
         Ok(())
@@ -1827,6 +1854,7 @@ impl<L: HidLink> Device<L> {
         if !was_marked || self.remembered_profile.is_none() {
             self.remembered_profile = before.or(self.remembered_profile);
         }
+        self.apply_host_overlay();
         // The DPI buttons work through the spy; without it host mode still works.
         self.start_spy().map_err(WriteFailure::Lost)
     }
@@ -2024,6 +2052,16 @@ impl<L: HidLink> Device<L> {
                 }
             }
         }
+        // A mouse that was already in host mode when the app started gave no
+        // profile before the switch: the stored one stands in.
+        if self.remembered_profile.is_none()
+            && let Some(sector) = prefs
+                .profile
+                .filter(|s| (1..=5).contains(s) && self.profile_of(*s).is_some())
+        {
+            self.remembered_profile = Some(sector);
+        }
+        self.apply_host_overlay();
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(log);
         };

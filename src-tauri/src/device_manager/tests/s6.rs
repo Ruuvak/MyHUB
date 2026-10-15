@@ -1647,6 +1647,7 @@ fn host_prefs() -> DevicePrefs {
         dpi: Some(1200),
         report_rate_hz: Some(500),
         mode: OnboardMode::Host,
+        profile: None,
     }
 }
 
@@ -1745,6 +1746,114 @@ fn start_with_mode_host_restores_app_control_with_these_frames() {
         .is_empty()
     );
     assert!(hex_frames(&handle, from).is_empty());
+}
+
+/// A mouse that is already in host mode when the app starts: fn2 reads host,
+/// fn4 reads 0000. Profile 3 has levels 400..3200.
+fn host_at_start_device() -> (Device<MockLink>, Handle) {
+    let (mut device, handle) = mock_device();
+    {
+        let mut mock = handle.borrow_mut();
+        mock.replies.insert(hex(FN2_TX), mode_reply(2));
+        mock.replies
+            .insert(fn4_tx(), long(&[0x11, 0x01, IDX_ONBOARD, 0x4b]));
+    }
+    step(&mut device);
+    let snap = device.snapshot.as_mut().unwrap();
+    for entry in &mut snap.onboard.directory.entries {
+        entry.enabled |= entry.sector == 3;
+    }
+    let p3 = snap
+        .onboard
+        .profiles
+        .iter_mut()
+        .find(|p| p.sector == "0x0003")
+        .and_then(|p| p.profile.as_mut())
+        .unwrap();
+    p3.dpi_levels = [400, 800, 1200, 1600, 3200];
+    device.take_dirty();
+    (device, handle)
+}
+
+#[test]
+fn a_mouse_already_in_host_at_start_gets_its_profile_from_the_prefs() {
+    let (mut device, handle) = host_at_start_device();
+    assert_eq!(device.active_sector(), Some(0));
+    let prefs = DevicePrefs {
+        dpi: Some(1600),
+        profile: Some(3),
+        ..host_prefs()
+    };
+    let prefs = DevicePrefs {
+        report_rate_hz: None,
+        ..prefs
+    };
+    restore_with(
+        &mut device,
+        &settings_for_restore(true, true),
+        &prefs,
+        Instant::now(),
+    );
+    assert!(device.host_by_us());
+    assert_eq!(device.remembered_profile, Some(3));
+    assert_eq!(onboard_of(&device).active_profile, Some(3));
+    // DPI up: 1600 -> 3200, the next level of profile 3.
+    press(&mut device, &handle, &[0x0002]);
+    assert_eq!(device.dpi_target, Some(3200));
+}
+
+#[test]
+fn a_stored_profile_without_a_parsed_sector_is_ignored() {
+    let (mut device, _handle) = host_at_start_device();
+    for profile in [Some(9), Some(0), Some(0x0101)] {
+        let prefs = DevicePrefs {
+            profile,
+            dpi: None,
+            report_rate_hz: None,
+            ..host_prefs()
+        };
+        device.last_restore = None;
+        restore_with(
+            &mut device,
+            &settings_for_restore(true, true),
+            &prefs,
+            Instant::now(),
+        );
+        assert_eq!(device.remembered_profile, None, "{profile:?}");
+    }
+}
+
+#[test]
+fn in_app_control_a_confirm_read_of_0000_keeps_the_remembered_profile() {
+    let (mut device, handle) = spy_device();
+    assert_eq!(onboard_of(&device).active_profile, Some(2));
+    {
+        let mut mock = handle.borrow_mut();
+        mock.replies
+            .insert(fn4_tx(), long(&[0x11, 0x01, IDX_ONBOARD, 0x4b]));
+        mock.replies.insert(dpi_get_tx(), dpi_get_reply(1600));
+    }
+    device.confirm_pending = true;
+    device.confirm_read().unwrap();
+    assert_eq!(onboard_of(&device).active_profile, Some(2));
+    // Back in onboard mode the read is trusted as it is.
+    device.snapshot.as_mut().unwrap().onboard.mode_raw_hex = Some("01000000".into());
+    device.set_host_by_us(false);
+    device.confirm_pending = true;
+    device.confirm_read().unwrap();
+    assert_eq!(onboard_of(&device).active_profile, None);
+}
+
+#[test]
+fn entering_stores_the_profile_in_the_prefs_file() {
+    let (dir, path) = prefs_file(OnboardMode::Onboard);
+    let (mut device, handle) = read_device();
+    onboard_mouse(&handle);
+    enter_and_store(&mut device, Some(&path), ID, true, far_deadline()).expect("enter");
+    let prefs = settings::load_prefs(&path).unwrap();
+    assert_eq!(prefs.mode, OnboardMode::Host);
+    assert_eq!(prefs.profile, Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

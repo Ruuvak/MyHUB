@@ -88,6 +88,9 @@ pub struct DevicePrefs {
     /// profiles (the default). Stored by enter and leave only; writes off, quit
     /// and shutdown return the mouse to onboard without changing it.
     pub mode: OnboardMode,
+    /// The user profile sector (1..=5) that was active when app control was
+    /// entered; the mouse reports no profile while in host mode.
+    pub profile: Option<u16>,
 }
 
 /// Coarse battery level reported by the mouse (0x1004 byte 1) [INF].
@@ -535,12 +538,19 @@ mod tests {
             dpi: Some(1200),
             report_rate_hz: None,
             mode: OnboardMode::Host,
+            profile: Some(3),
         };
         let json = serde_json::to_string(&prefs).unwrap();
-        assert_eq!(json, r#"{"dpi":1200,"reportRateHz":null,"mode":"host"}"#);
-        // An old file without a mode means onboard.
+        assert_eq!(
+            json,
+            r#"{"dpi":1200,"reportRateHz":null,"mode":"host","profile":3}"#
+        );
+        // An old file without a mode means onboard, without a profile none.
         let old: DevicePrefs = serde_json::from_str(r#"{"dpi":800}"#).unwrap();
         assert_eq!(old.mode, OnboardMode::Onboard);
+        assert_eq!(old.profile, None);
+        let old: DevicePrefs = serde_json::from_str(r#"{"dpi":800,"mode":"host"}"#).unwrap();
+        assert_eq!(old.profile, None);
         assert_eq!(serde_json::from_str::<DevicePrefs>(&json).unwrap(), prefs);
         assert_eq!(
             serde_json::from_str::<DevicePrefs>("{}").unwrap(),
