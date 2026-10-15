@@ -4,6 +4,7 @@ members = [
     "crates/hidpp",
     "crates/mdr",
     "crates/keychron-proto",
+    "crates/devices/keychron-k2he",
     "crates/rfcomm",
     "crates/devices/sony-wf-c710n",
     "crates/core",
@@ -22,6 +23,7 @@ publish = false
 hidpp = { path = "crates/hidpp" }
 mdr = { path = "crates/mdr" }
 keychron-proto = { path = "crates/keychron-proto" }
+keychron-k2he = { path = "crates/devices/keychron-k2he" }
 myhub-rfcomm = { path = "crates/rfcomm" }
 myhub-core = { path = "crates/core" }
 myhub-transport = { path = "crates/transport" }
