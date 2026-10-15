@@ -16,9 +16,16 @@ const TRAY_ID: &str = "main";
 const ID_FLYOUT: &str = "flyout";
 const ID_SHOW: &str = "show";
 pub const ID_DEVICES_STATUS: &str = "devices-status";
-const ID_SECOND_STATUS: &str = "devices-status-2";
-/// Menu index of the second status line: after flyout, show and the first status line.
-const SECOND_STATUS_POSITION: usize = 3;
+/// Most device status rows the menu shows. Rows beyond the first sit in the menu only while
+/// they have a line.
+pub const MAX_STATUS_ROWS: usize = 3;
+/// Menu index of the first extra status row: after flyout, show and the first status row.
+const EXTRA_STATUS_POSITION: usize = 3;
+
+/// Menu id of the extra status row `n` (1-based among the extra rows: row 1 is the second line).
+fn extra_status_id(n: usize) -> String {
+    format!("devices-status-{}", n + 1)
+}
 const ID_QUIT: &str = "quit";
 
 /// Battery level at or below which the tray shows the low battery icon.
@@ -129,9 +136,9 @@ pub struct TrayState {
     flyout: MenuItem<tauri::Wry>,
     show: MenuItem<tauri::Wry>,
     devices_status: MenuItem<tauri::Wry>,
-    /// Second status line (headset); in the menu only while `second_shown`.
-    second_status: MenuItem<tauri::Wry>,
-    second_shown: Mutex<bool>,
+    /// Status rows after the first; row `i` is in the menu only while its flag is set. The shown
+    /// rows are always a prefix.
+    extra_status: Vec<(MenuItem<tauri::Wry>, Mutex<bool>)>,
     menu: Menu<tauri::Wry>,
     quit: MenuItem<tauri::Wry>,
     /// Text set by the device layer; `None` means the localized "No devices".
@@ -148,28 +155,28 @@ impl TrayState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Main thread only: sets the second status line, inserting its item under the first line
-    /// when it is not in the menu yet, or removing it when `text` is `None`.
-    fn show_second(&self, text: Option<&str>) {
-        let mut shown = self
-            .second_shown
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match text {
-            Some(text) => {
-                let _ = self.second_status.set_text(text);
-                if !*shown
-                    && self
-                        .menu
-                        .insert(&self.second_status, SECOND_STATUS_POSITION)
-                        .is_ok()
-                {
-                    *shown = true;
+    /// Main thread only: sets the status rows after the first one from `lines`, inserting an item
+    /// below the previous row when it is not in the menu yet, or removing it when it has no line.
+    fn show_extra(&self, lines: &[String]) {
+        for (i, (item, shown)) in self.extra_status.iter().enumerate() {
+            let mut shown = shown
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match lines.get(i) {
+                Some(text) => {
+                    let _ = item.set_text(text);
+                    if !*shown {
+                        if self.menu.insert(item, EXTRA_STATUS_POSITION + i).is_err() {
+                            // Later rows would land below the separator: keep the prefix.
+                            break;
+                        }
+                        *shown = true;
+                    }
                 }
-            }
-            None => {
-                if *shown && self.menu.remove(&self.second_status).is_ok() {
-                    *shown = false;
+                None => {
+                    if *shown && self.menu.remove(item).is_ok() {
+                        *shown = false;
+                    }
                 }
             }
         }
@@ -198,9 +205,14 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
     let devices_status = MenuItemBuilder::with_id(ID_DEVICES_STATUS, t.no_devices)
         .enabled(false)
         .build(app)?;
-    let second_status = MenuItemBuilder::with_id(ID_SECOND_STATUS, "")
-        .enabled(false)
-        .build(app)?;
+    let extra_status = (1..MAX_STATUS_ROWS)
+        .map(|n| {
+            MenuItemBuilder::with_id(extra_status_id(n), "")
+                .enabled(false)
+                .build(app)
+                .map(|item| (item, Mutex::new(false)))
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
     let quit = MenuItemBuilder::with_id(ID_QUIT, t.quit).build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&flyout, &show, &devices_status, &separator, &quit])?;
@@ -246,8 +258,7 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
         flyout,
         show,
         devices_status,
-        second_status,
-        second_shown: Mutex::new(false),
+        extra_status,
         menu,
         quit,
         devices_text: Mutex::new(None),
@@ -270,14 +281,18 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     }
 }
 
-/// For the device layer: sets the text of the disabled `devices-status` item
-/// (or restores the localized "No devices" with `None`) and of the second line
-/// below it. The second item sits in the menu only while `second` is `Some`.
-/// No-op without a tray.
-pub fn set_devices_status(app: &AppHandle, text: Option<String>, second: Option<String>) {
+/// For the device layer: sets the text of the disabled `devices-status` item from the first of
+/// `lines` (or restores the localized "No devices" when there is none) and of the extra rows
+/// below it. An extra row sits in the menu only while it has a line; lines beyond
+/// [`MAX_STATUS_ROWS`] are dropped. No-op without a tray.
+pub fn set_devices_status(app: &AppHandle, mut lines: Vec<String>) {
     let Some(state) = app.try_state::<TrayState>() else {
         return;
     };
+    lines.truncate(MAX_STATUS_ROWS);
+    let mut lines = lines.into_iter();
+    let text = lines.next();
+    let extra: Vec<String> = lines.collect();
     let shown = match &text {
         Some(text) => text.clone(),
         None => {
@@ -293,7 +308,7 @@ pub fn set_devices_status(app: &AppHandle, text: Option<String>, second: Option<
     let _ = app.run_on_main_thread(move || {
         let _ = item.set_text(shown);
         if let Some(state) = handle.try_state::<TrayState>() {
-            state.show_second(second.as_deref());
+            state.show_extra(&extra);
         }
     });
 }

@@ -34,6 +34,8 @@ export function deviceErrorMessage(error: unknown): { key: MessageKey; vars?: Re
   switch (code) {
     case "writesDisabled":
       return { key: "err.writesDisabled" };
+    case "notSupported":
+      return { key: "err.notSupported" };
     case "notHostMode":
       return { key: "err.notHostMode" };
     case "disconnected":

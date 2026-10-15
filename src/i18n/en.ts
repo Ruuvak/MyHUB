@@ -127,6 +127,7 @@ export const en = {
   "tile.temporary": "App control",
   "tile.flash": "Saved in the mouse profile",
   "err.writesDisabled": "Changing settings is turned off.",
+  "err.notSupported": "This device does not support this change.",
   "err.notHostMode": "Switch to app control first.",
   "err.disconnected": "The mouse is disconnected.",
   "err.outOfRange": "This value is outside the range the mouse supports.",

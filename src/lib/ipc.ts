@@ -154,7 +154,7 @@ export async function refreshDevice(id: string): Promise<DeviceDetail | null> {
 
 /**
  * Sets the DPI at runtime (volatile, lost when the mouse powers off). Rejects with a contract error
- * string: "writesDisabled", "notHostMode", "disconnected", "outOfRange", "verifyFailed", "deviceError:<code>".
+ * string: "writesDisabled", "notSupported", "notHostMode", "disconnected", "outOfRange", "verifyFailed", "deviceError:<code>".
  */
 export async function setDpi(id: string, dpi: number): Promise<DeviceDetail> {
   if (!isTauri()) {

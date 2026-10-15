@@ -129,6 +129,7 @@ export const pl: Messages = {
   "tile.temporary": "Sterowanie z aplikacji",
   "tile.flash": "Zapis w profilu myszy",
   "err.writesDisabled": "Zmiana ustawień jest wyłączona.",
+  "err.notSupported": "To urządzenie nie obsługuje tej zmiany.",
   "err.notHostMode": "Najpierw przełącz na sterowanie z aplikacji.",
   "err.disconnected": "Mysz jest rozłączona.",
   "err.outOfRange": "Ta wartość jest poza zakresem obsługiwanym przez mysz.",
