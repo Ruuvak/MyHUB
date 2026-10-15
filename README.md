@@ -2,6 +2,9 @@
 
 MyHUB is a lightweight peripheral manager for Windows and Linux that runs in the tray, starts with the system, and talks to devices directly over HID. It replaces vendor suites for the settings people change every day: DPI, report rate, onboard profiles and battery status. The first supported device is the Logitech G502 X LIGHTSPEED, driven over HID++ 2.0 through its LIGHTSPEED receiver, with no Logitech G HUB required.
 
+<img width="1411" height="1391" alt="obraz" src="https://github.com/user-attachments/assets/55d35734-fc16-4b00-b07a-20b36d13561e" />
+
+
 ## Status
 
 Version 0.1.0, under active development. Windows is the tested platform. A Linux build for Kubuntu (KDE Plasma) is planned and not yet tested.
