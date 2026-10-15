@@ -1,0 +1,15 @@
+[package]
+name = "sony-wf-c710n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mdr.workspace = true
+myhub-rfcomm.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,27 @@
+# MDR wire frames transcribed from the user's own WF-C710N headset (source: probe-log.txt). Addresses scrubbed.
+# Format: one frame per line. '>' host to headset, '<' headset to host, then the full escaped wire frame as hex (3e ... 3c), optional '# comment'.
+> 3e 0c 00 00 00 00 02 00 00 0e 3c  # CONNECT_GET_PROTOCOL_INFO
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 00 00 00 00 08 01 00 03 00 30 00 00 00 48 3c
+< 3e 0c 01 00 00 00 08 25 09 64 00 64 00 14 14 33 3c
+< 3e 0c 00 00 00 00 05 25 0a 32 00 15 87 3c
+< 3e 0c 01 00 00 00 04 15 01 01 01 29 3c
+< 3e 0c 00 00 00 00 08 25 09 64 00 64 00 14 14 32 3c
+> 3e 0c 01 00 00 00 02 02 00 11 3c  # CONNECT_GET_CAPABILITY_INFO
+< 3e 01 00 00 00 00 00 01 3c
+< 3e 0c 01 00 00 00 15 03 00 68 11 30 30 3a 31 31 3a 32 32 3a 33 33 3a 34 34 3a 35 35 1e 3c  # CONNECT_RET_CAPABILITY_INFO, scrubbed (headset address replaced with 00:11:22:33:44:55, checksum recomputed)
+> 3e 0c 00 00 00 00 02 04 01 13 3c  # CONNECT_GET_DEVICE_INFO MODEL_NAME
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 00 00 00 00 0b 05 01 08 57 46 2d 43 37 31 30 4e 18 3c
+> 3e 0c 01 00 00 00 02 04 02 15 3c  # CONNECT_GET_DEVICE_INFO FW_VERSION
+< 3e 01 00 00 00 00 00 01 3c
+< 3e 0c 01 00 00 00 08 05 02 05 31 2e 30 2e 35 13 3c
+> 3e 0c 00 00 00 00 02 04 03 15 3c  # CONNECT_GET_DEVICE_INFO SERIES_AND_COLOR
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 00 00 00 00 04 05 03 50 01 69 3c
+> 3e 0c 01 00 00 00 02 06 00 15 3c  # CONNECT_GET_SUPPORT_FUNCTION table1
+< 3e 01 00 00 00 00 00 01 3c
+< 3e 0c 01 00 00 00 3b 07 00 1c 10 ff 11 ff 12 ff 13 ff 14 ff 15 ff 17 ff 23 ff 25 2d 27 ff 29 ff 2a ff 32 ff 50 0a 6b 04 70 01 90 ff a1 0f b2 42 c1 ff d1 19 d2 33 e1 14 e2 17 f1 2f f3 1e f9 37 fd 22 90 3c
+> 3e 0e 00 00 00 00 02 06 00 16 3c  # CONNECT_GET_SUPPORT_FUNCTION table2
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0e 00 00 00 00 0d 07 00 05 42 34 31 ff 32 02 f1 ff f2 ff e2 3c

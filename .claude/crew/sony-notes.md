@@ -1,0 +1,10 @@
+# Sony WF-C710N module notes
+
+Reference materials (read-only, never copy into the repo): `D:\!KodowankoAI\Mini-Projekty\sony-mdr-protocol\` (BRIEF.md, DEVICE-WF-C710N.md, PROTOCOL.md; payloads.md, enums.md, function-types.md as lookup tables). Never open or copy `probe-log-5.txt`; never commit any `probe-log-*.txt`, the headset MAC, paired-device lists or track metadata. Fixtures in `crates/mdr/tests/fixtures/` are scrubbed (capability info address replaced by 00:11:22:33:44:55).
+
+Crates: `crates/mdr` (pure protocol, policy, link), `crates/rfcomm` (ByteLink, Windows Winsock AF_BTH, non-Windows stub), `crates/devices/sony-wf-c710n` (Session, read_snapshot, `examples/mdr_probe.rs` read-only).
+
+Hardware log (all read tier only, user-approved):
+- [OBS] 2026-10-15 `mdr_probe list`: one paired match, name WF-C710N, Windows lists the MDR service UUID for it.
+- [OBS] 2026-10-15 `mdr_probe state` (4.6 s incl. connect): model WF-C710N, firmware 1.0.5, protocol version 0x03003000, 33 functions (table 1 and 2); battery L 100 R 100 not charging, thresholds 20/20; case 70 not charging, threshold 21; NC/ASM NC, normal, level 20, ranges 1..20 step 1 for normal and voice; EQ CUSTOM bands 16 14 11 10 12 15, 6 bands, 21 steps, 12 presets; multipoint ON, sidetone ON, codec AAC. Matches the RE logs.
+- [OBS] 2026-10-15 `mdr_probe watch 300`: after 2.0 s an unsolicited 0xA5 (PLAY_NTFY_STATUS, 5 bytes); after 27.6 s of idle 50 ms SO_RCVTIMEO polls, notifications still arrived: NC/ASM NTFY (NC, normal, 20, changed), 0x15 (COMMON_NTFY_STATUS, 4 bytes), battery LR NTFY 100/100; then the link dropped and the probe reported `Bluetooth link disconnected` (RfcommError::Disconnected, not a silent timeout). Cause of the drop: the user put both buds into the case at about 28 s and they switched off; the notifications at 27.6 s came with that action. So a power-off by the case shows up as RfcommError::Disconnected within about 1 s [OBS]. The probe exited with code 0 after the failure (should be non-zero).

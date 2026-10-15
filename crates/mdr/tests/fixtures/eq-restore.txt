@@ -1,0 +1,17 @@
+# MDR wire frames transcribed from the user's own WF-C710N headset (source: probe-log-10-eq-restore.txt). Addresses scrubbed.
+# Format: one frame per line. '>' host to headset, '<' headset to host, then the full escaped wire frame as hex (3e ... 3c), optional '# comment'.
+> 3e 0c 00 00 00 00 02 56 00 64 3c  # EQEBB_GET_PARAM (current)
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 01 00 00 00 0a 57 00 16 06 11 0a 0a 0a 0a 0a cd 3c
+> 3e 0c 01 00 00 00 04 58 00 a0 00 09 3c  # EQEBB_SET_PARAM select CUSTOM (no bands)
+< 3e 01 00 00 00 00 00 01 3c
+< 3e 0c 00 00 00 00 0a 59 00 a0 06 10 0e 0b 0a 0c 0f 63 3c
+> 3e 0c 00 00 00 00 02 56 00 64 3c  # EQEBB_GET_PARAM (after select CUSTOM)
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 01 00 00 00 0a 57 00 a0 06 10 0e 0b 0a 0c 0f 62 3c
+> 3e 0c 01 00 00 00 0a 58 00 a0 06 10 0e 0b 0a 0c 0f 63 3c  # EQEBB_SET_PARAM CUSTOM with original bands
+< 3e 01 00 00 00 00 00 01 3c
+< 3e 0c 00 00 00 00 02 59 00 67 3c
+> 3e 0c 00 00 00 00 02 56 00 64 3c  # EQEBB_GET_PARAM (final)
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 01 00 00 00 0a 57 00 a0 06 10 0e 0b 0a 0c 0f 62 3c
