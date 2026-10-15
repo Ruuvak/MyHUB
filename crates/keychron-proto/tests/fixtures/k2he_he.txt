@@ -1,0 +1,16 @@
+# HE profile buffer facts from the real K2 HE (version 4, 860 bytes, 6x16 keys, 20 DKS, 20 snap).
+# Source: hw-read-2026-10-15.md. Bytes are hex. name = key, then bytes.
+# Profile 0 global word: mode 1, actuation 20, press 4, release 4. All other bytes zero.
+global_profile0: 51 04 01 00
+# Profile 1 (Gaming) global word: mode 2 (rapid trigger).
+global_profile1: 52 04 01 00
+# Write test T1 (profile 0), DKS slot 0 as read back: travel word 0x856B0B -> [11, 22, 33, 44],
+# keycodes LE 4 5 6 7, action bytes verbatim.
+dks_t1_slot0: 0b 6b 85 04 00 05 00 06 00 07 00 02 00 06 00 03 00 07 00
+# Key word after T1: advanceMode 3 (DKS), slot 0.
+dks_t1_keyword: 00 00 30 00
+# Profile 2 analog key (DERIVED from the documented shape, not a raw read): advanceMode 4,
+# analog id in the top byte, here id 3.
+analog_id3_keyword: 00 00 40 03
+# Write test T3: name "AB" stored as UTF-16LE at offset 828.
+name_ab: 41 00 42 00

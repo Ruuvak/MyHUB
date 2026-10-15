@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/hidpp",
     "crates/mdr",
+    "crates/keychron-proto",
     "crates/rfcomm",
     "crates/devices/sony-wf-c710n",
     "crates/core",
@@ -20,6 +21,7 @@ publish = false
 [workspace.dependencies]
 hidpp = { path = "crates/hidpp" }
 mdr = { path = "crates/mdr" }
+keychron-proto = { path = "crates/keychron-proto" }
 myhub-rfcomm = { path = "crates/rfcomm" }
 myhub-core = { path = "crates/core" }
 myhub-transport = { path = "crates/transport" }
