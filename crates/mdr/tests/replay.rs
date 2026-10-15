@@ -463,3 +463,21 @@ fn replaying_the_headset_side_through_the_link_acks_every_data_frame() {
     }
     assert_eq!(acks.len(), data_frames);
 }
+
+#[test]
+fn eq_extended_info_reply_names_every_band() {
+    use mdr::EqBandEntry::{ClearBass, Hz};
+    let msgs = headset_messages(EQ_EXTENDED);
+    let info = find(&msgs, |m| match m {
+        Message::EqBandInfo(i) => Some(i),
+        _ => None,
+    })
+    .expect("5b reply parsed");
+    assert_eq!(
+        info.entries,
+        [ClearBass, Hz(400), Hz(1000), Hz(2500), Hz(6300), Hz(16000)]
+    );
+    // Length is checked exactly, a short entry list is Unknown.
+    let short = parse(Table::One, &[0x5B, 0x00, 0x02, 0x01, 0x01, 0x90]);
+    assert!(matches!(short.message, Message::Unknown(_)));
+}

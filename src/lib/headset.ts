@@ -1,4 +1,5 @@
 import type { MessageKey } from "../i18n/en";
+import type { Language } from "./language";
 import type { CellCharging, EqView, HeadsetCell, HeadsetView } from "./types";
 
 /** Lower of the left and right bud percent, or null when neither is reported. */
@@ -49,4 +50,24 @@ export function formatDb(db: number): string {
 
 export function eqHalfRange(eq: EqView): number {
   return Math.max(1, (eq.stepCount - 1) / 2);
+}
+
+/** Frequency text for a band label: "400 Hz", "1 kHz", "2,5 kHz" (pl) or "2.5 kHz" (en). */
+export function formatHz(hz: number, language: Language): string {
+  const locale = language === "pl" ? "pl-PL" : "en-US";
+  const number = (n: number) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(n);
+  return hz >= 1000 ? `${number(hz / 1000)} kHz` : `${number(hz)} Hz`;
+}
+
+/** Bands split like the Sony app: frequency sliders plus the Clear Bass slider; null without band info or frequency bands. */
+export function splitBands(eq: EqView): { freq: { index: number; hz: number }[]; clearBass: number | null } | null {
+  const info = eq.bandInfo;
+  if (!info || info.length !== eq.bands.length) return null;
+  const freq: { index: number; hz: number }[] = [];
+  info.forEach((b, index) => {
+    if (b.kind === "hz" && b.hz !== null) freq.push({ index, hz: b.hz });
+  });
+  if (freq.length === 0) return null;
+  const clear = info.findIndex((b) => b.kind === "clearBass");
+  return { freq, clearBass: clear >= 0 ? clear : null };
 }

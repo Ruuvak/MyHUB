@@ -774,3 +774,18 @@ fn one_delivered_alert_gives_exactly_one_token() {
     assert!(a.take_token().is_some());
     assert!(a.take_token().is_none());
 }
+
+#[test]
+fn eq_band_info_read_needs_the_eq_function_and_type() {
+    let r = messages::eq_extended_info();
+    assert_eq!(r.payload, [0x5A, 0x00]);
+    assert_eq!(chk(read(), &r).unwrap().payload(), [0x5A, 0x00]);
+    assert_denied(chk(read(), &t1(&[0x5A, 0x01])));
+    assert_denied(chk(read(), &t1(&[0x5A, 0x00, 0x00])));
+    assert_denied(chk(read(), &t1(&[0x5A])));
+    // Inquired type 0x34 (customizable sound effect reset) is hard denied on every EQEBB command.
+    assert_denied(chk(read(), &t1(&[0x5A, 0x34])));
+    assert_denied(read().check_e(&FunctionTable::new(), &limits(), &r));
+    let other = ft_with(&[(0x51, 0x00)], &[]);
+    assert_denied(read().check_e(&other, &limits(), &r));
+}

@@ -244,6 +244,7 @@ export const pl: Messages = {
   "headset.ambient.level": "Poziom dźwięku otoczenia",
   "headset.eq.title": "Korektor",
   "headset.eq.band": "Pasmo {n}",
+  "headset.eq.clearBass": "Clear Bass",
   "headset.eq.bands": "Pasma korektora w dB",
   "headset.eq.presetUnknown": "Ustawienie {n}",
   "headset.eq.preset.off": "Wyłączony",

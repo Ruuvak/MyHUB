@@ -33,6 +33,8 @@ pub mod command {
     pub const EQEBB_RET_PARAM: u8 = 0x57;
     pub const EQEBB_SET_PARAM: u8 = 0x58;
     pub const EQEBB_NTFY_PARAM: u8 = 0x59;
+    pub const EQEBB_GET_EXTENDED_INFO: u8 = 0x5A;
+    pub const EQEBB_RET_EXTENDED_INFO: u8 = 0x5B;
     pub const NCASM_GET_CAPABILITY: u8 = 0x60;
     pub const NCASM_RET_CAPABILITY: u8 = 0x61;
     pub const NCASM_GET_PARAM: u8 = 0x66;
@@ -157,6 +159,11 @@ pub fn eq_capability() -> Request {
 /// EQEBB_GET_PARAM `56 00`.
 pub fn eq_get_param() -> Request {
     Request::table1(vec![0x56, 0x00])
+}
+
+/// EQEBB_GET_EXTENDED_INFO `5a 00`, what each band of the EQ array means.
+pub fn eq_extended_info() -> Request {
+    Request::table1(vec![0x5A, 0x00])
 }
 
 /// Select a preset: `58 00 <preset id> 00` (empty band list, as the app does).
@@ -474,6 +481,29 @@ pub struct EqParam {
     pub bands: Vec<u8>,
 }
 
+/// One entry of `5b 00 <n> [type u8][value u16 BE]*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EqBandEntry {
+    /// Type `01`, a centre frequency in Hz (also type `02` kHz, value times 1000).
+    Hz(u32),
+    /// Type `10` with value 1: drawn by the Sony app as its own Clear Bass slider. [INF] from the
+    /// decompiled app (`application/a2.java`); the entry itself is [OBS] on the WF-C710N (RE Round 6).
+    ClearBass,
+    /// Type `10` with another value.
+    Special(u16),
+    /// Any other type.
+    Other { kind: u8, value: u16 },
+}
+
+/// `5b 00 <n> [entry]*`, same order and length as the bands of `57|59 00`
+/// (`DEVICE-WF-C710N.md` Round 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqExtendedInfo {
+    pub entries: Vec<EqBandEntry>,
+}
+
 /// General setting param `d7|d9 <kind> 00 <value>`; value `00` = ON, `01` = OFF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -596,6 +626,7 @@ pub enum Message {
     NcAsmParam(NcAsmParam),
     EqCapability(EqCapability),
     EqParam(EqParam),
+    EqBandInfo(EqExtendedInfo),
     /// A bare `59 00`: something changed or a request was ignored. Re-read with `56 00`.
     EqChanged,
     GeneralSetting(GeneralSetting),
@@ -714,6 +745,31 @@ fn parse_eq_param(p: &[u8]) -> Option<EqParam> {
     })
 }
 
+fn parse_eq_extended(p: &[u8]) -> Option<EqExtendedInfo> {
+    let [_, 0x00, n, rest @ ..] = p else {
+        return None;
+    };
+    if rest.len() != usize::from(*n) * 3 {
+        return None;
+    }
+    let entries = rest
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&[kind, hi, lo]| {
+            let value = u16::from_be_bytes([hi, lo]);
+            match (kind, value) {
+                (0x01, v) => EqBandEntry::Hz(u32::from(v)),
+                (0x02, v) => EqBandEntry::Hz(u32::from(v) * 1000),
+                (0x10, 1) => EqBandEntry::ClearBass,
+                (0x10, v) => EqBandEntry::Special(v),
+                (kind, value) => EqBandEntry::Other { kind, value },
+            }
+        })
+        .collect();
+    Some(EqExtendedInfo { entries })
+}
+
 fn parse_general_setting(p: &[u8]) -> Option<GeneralSetting> {
     let [_, kind, 0x00, value] = *p else {
         return None;
@@ -797,6 +853,9 @@ fn parse_known(table: Table, p: &[u8]) -> Option<(Origin, Message)> {
         }
         (Table::One, command::EQEBB_RET_PARAM) => {
             Some((Reply, Message::EqParam(parse_eq_param(p)?)))
+        }
+        (Table::One, command::EQEBB_RET_EXTENDED_INFO) => {
+            Some((Reply, Message::EqBandInfo(parse_eq_extended(p)?)))
         }
         (Table::One, command::EQEBB_NTFY_PARAM) => {
             if p == [command::EQEBB_NTFY_PARAM, 0x00] {

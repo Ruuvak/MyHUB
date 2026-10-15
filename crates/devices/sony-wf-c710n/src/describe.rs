@@ -38,6 +38,7 @@ pub fn describe(incoming: &Incoming) -> String {
             eq_preset_name(p.preset).unwrap_or("unknown"),
             p.bands
         ),
+        Message::EqBandInfo(i) => format!("EQ band info, {} entries", i.entries.len()),
         Message::EqChanged => "EQ changed".to_string(),
         Message::GeneralSetting(g) => {
             format!("{:?} {}", g.kind, if g.enabled { "on" } else { "off" })

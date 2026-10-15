@@ -9,11 +9,12 @@ use mdr::{DataType, Table, decode_frame, encode_ack};
 use myhub_rfcomm::MockLink;
 use sony_wf_c710n::{Session, SessionError, Snapshot, read_snapshot};
 
-const FIXTURES: [&str; 4] = [
+const FIXTURES: [&str; 5] = [
     include_str!("../../../mdr/tests/fixtures/handshake.txt"),
     include_str!("../../../mdr/tests/fixtures/features.txt"),
     include_str!("../../../mdr/tests/fixtures/multipoint.txt"),
     include_str!("../../../mdr/tests/fixtures/toggles.txt"),
+    include_str!("../../../mdr/tests/fixtures/eq-extended.txt"),
 ];
 
 fn hex(s: &str) -> Vec<u8> {
@@ -127,7 +128,9 @@ fn snapshot_from_the_fixtures_has_the_logged_values() {
 
 #[test]
 fn session_writes_only_acks_and_read_tier_requests() {
-    const READ_COMMANDS: [u8; 10] = [0x00, 0x04, 0x06, 0x12, 0x22, 0x50, 0x56, 0x60, 0x66, 0xD6];
+    const READ_COMMANDS: [u8; 11] = [
+        0x00, 0x04, 0x06, 0x12, 0x22, 0x50, 0x56, 0x5A, 0x60, 0x66, 0xD6,
+    ];
     let (_, writes) = snapshot_run();
     assert!(writes.len() > 10);
     for w in writes {
@@ -250,6 +253,23 @@ fn to_detail_maps_the_fixture_snapshot() {
     assert_eq!(h["ncAsm"]["level"], 20);
     assert_eq!(h["eq"]["preset"], 0xA0);
     assert_eq!(h["eq"]["presetName"], "custom");
+    let info = h["eq"]["bandInfo"].as_array().expect("band info");
+    assert_eq!(info[0]["kind"], "clearBass");
+    assert_eq!(info[0]["hz"], serde_json::Value::Null);
+    let hz: Vec<_> = info[1..]
+        .iter()
+        .map(|b| (b["kind"].as_str().unwrap(), b["hz"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        hz,
+        [
+            ("hz", 400),
+            ("hz", 1000),
+            ("hz", 2500),
+            ("hz", 6300),
+            ("hz", 16000)
+        ]
+    );
     let names: Vec<_> = h["eq"]["presets"]
         .as_array()
         .unwrap()

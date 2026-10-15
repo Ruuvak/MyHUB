@@ -3,8 +3,8 @@
 use mdr::function::FunctionInfo;
 use mdr::function::{EQ_TYPE_PRESET, NCASM_TYPE_DUAL_AMBIENT, function_id};
 use mdr::messages::{
-    self, AudioCodec, BatteryLr, Cradle, DeviceInfo, DeviceInfoKind, EqCapability, EqParam,
-    GeneralSettingKind, Message, NcAsmCapability, NcAsmParam,
+    self, AudioCodec, BatteryLr, Cradle, DeviceInfo, DeviceInfoKind, EqCapability, EqExtendedInfo,
+    EqParam, GeneralSettingKind, Message, NcAsmCapability, NcAsmParam,
 };
 use mdr::{FunctionTable, Incoming, Request, Table};
 use myhub_rfcomm::ByteLink;
@@ -33,6 +33,8 @@ pub struct NcAsmSnapshot {
 pub struct EqSnapshot {
     pub capability: EqCapability,
     pub param: EqParam,
+    /// `5a 00` reply, `None` when the headset did not answer.
+    pub band_info: Option<EqExtendedInfo>,
 }
 
 /// Everything read from the headset. Holds no address and no capability info string.
@@ -156,9 +158,18 @@ pub fn read_snapshot<L: ByteLink>(session: &mut Session<L>) -> Result<Snapshot, 
     let eq = if session.functions().has_eq_type(EQ_TYPE_PRESET) {
         let cap = ask(session, &messages::eq_capability())?;
         let param = ask(session, &messages::eq_get_param())?;
+        let info = ask(session, &messages::eq_extended_info())?;
         match (cap.map(|i| i.message), param.map(|i| i.message)) {
             (Some(Message::EqCapability(capability)), Some(Message::EqParam(param))) => {
-                Some(EqSnapshot { capability, param })
+                let band_info = match info.map(|i| i.message) {
+                    Some(Message::EqBandInfo(i)) => Some(i),
+                    _ => None,
+                };
+                Some(EqSnapshot {
+                    capability,
+                    param,
+                    band_info,
+                })
             }
             _ => None,
         }

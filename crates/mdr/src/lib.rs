@@ -27,5 +27,8 @@ pub use frame::{
 };
 pub use function::{FunctionEntry, FunctionTable, Table};
 pub use link::{Link, LinkEvent, SendError, Tick};
-pub use messages::{AlertToken, Incoming, Message, Origin, Request, parse, parse_received};
+pub use messages::{
+    AlertToken, EqBandEntry, EqExtendedInfo, Incoming, Message, Origin, Request, parse,
+    parse_received,
+};
 pub use policy::{CheckedRequest, DeviceLimits, Policy, PolicyError};

@@ -2,9 +2,10 @@ import { BatteryFull, Faders, Gear, Waveform } from "@phosphor-icons/react";
 import { useEffect, useId, useState } from "react";
 import { BatteryBar } from "../../components/device/BatteryBar";
 import { ReadOnlyNote } from "../../components/device/ReadOnlyNote";
+import { useLanguage } from "../../i18n/usePlural";
 import { useT } from "../../i18n/useT";
 import { cx } from "../../lib/cx";
-import { bandDb, cellChargingKey, formatDb, presetKey } from "../../lib/headset";
+import { bandDb, cellChargingKey, formatDb, formatHz, presetKey, splitBands } from "../../lib/headset";
 import { refreshDevice, setEqBands, setEqPreset, setHeadsetToggle, setNcAsm } from "../../lib/ipc";
 import type { DeviceDetail, EqView, HeadsetCell, NcAsmArgs, NcAsmView } from "../../lib/types";
 import { Button, Panel, SegmentedControl, Switch } from "../../ui";
@@ -279,6 +280,7 @@ export function Equalizer({
   onSaveBands: (bands: number[]) => Promise<boolean>;
 }) {
   const t = useT();
+  const language = useLanguage();
   const [draft, setDraft] = useState<number[] | null>(null);
   const bandsKey = eq.bands.join(",");
   const bands = draft ?? eq.bands;
@@ -288,6 +290,8 @@ export function Equalizer({
   useEffect(() => {
     setDraft((d) => (d !== null && d.join(",") === bandsKey ? null : d));
   }, [bandsKey]);
+
+  const split = splitBands(eq);
 
   function setBand(index: number, step: number) {
     setDraft((d) => {
@@ -319,6 +323,53 @@ export function Equalizer({
           );
         })}
       </select>
+      {split ? (
+        <div className="flex flex-col gap-4">
+          <div className="flex gap-2">
+            <div aria-hidden="true" className="relative mt-[1.375rem] h-24 w-8 shrink-0 font-mono text-xs tabular-nums text-text-faint">
+              <span className="absolute top-0 right-0 -translate-y-1/2">{formatDb(bandDb(eq.stepCount - 1, eq.stepCount))}</span>
+              <span className="absolute top-1/2 right-0 -translate-y-1/2">0</span>
+              <span className="absolute bottom-0 right-0 translate-y-1/2">{formatDb(bandDb(0, eq.stepCount))}</span>
+            </div>
+            <ul aria-label={t("headset.eq.bands")} className="grid min-w-0 flex-1 gap-2" style={{ gridTemplateColumns: `repeat(${split.freq.length}, minmax(0, 1fr))` }}>
+              {split.freq.map(({ index, hz }) => {
+                const step = bands[index] ?? 0;
+                const db = bandDb(step, eq.stepCount);
+                const label = formatHz(hz, language);
+                return (
+                  <li key={index} className="flex flex-col items-center gap-1.5">
+                    <span className="font-mono text-xs tabular-nums text-text">{formatDb(db)}</span>
+                    <div className="relative h-24 w-6">
+                      <input
+                        type="range"
+                        aria-label={label}
+                        aria-valuetext={`${formatDb(db)} dB`}
+                        min={0}
+                        max={eq.stepCount - 1}
+                        step={1}
+                        value={step}
+                        disabled={disabled}
+                        onChange={(event) => setBand(index, Number(event.currentTarget.value))}
+                        className="absolute top-1/2 left-1/2 h-5 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 accent-accent disabled:opacity-50"
+                      />
+                    </div>
+                    <span className="text-xs text-text-faint">{label}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+          {split.clearBass !== null ? (
+            <ClearBassSlider
+              step={bands[split.clearBass] ?? 0}
+              stepCount={eq.stepCount}
+              disabled={disabled}
+              label={t("headset.eq.clearBass")}
+              onChange={(step) => setBand(split.clearBass ?? 0, step)}
+            />
+          ) : null}
+        </div>
+      ) : (
       <ul aria-label={t("headset.eq.bands")} className="grid grid-cols-6 gap-2">
         {bands.map((step, i) => {
           const db = bandDb(step, eq.stepCount);
@@ -344,6 +395,7 @@ export function Equalizer({
           );
         })}
       </ul>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="primary"
@@ -453,6 +505,60 @@ function SettingRow({ label, value, mono }: { label: string; value: string; mono
     <div className="flex items-center justify-between gap-4 py-2.5 text-base">
       <dt className="text-text-muted">{label}</dt>
       <dd className={cx("text-text", mono && "font-mono tabular-nums")}>{value}</dd>
+    </div>
+  );
+}
+
+/** Clear Bass as its own horizontal slider on the same scale as the bands, with ticks at both ends and the middle. */
+function ClearBassSlider({
+  step,
+  stepCount,
+  disabled,
+  label,
+  onChange,
+}: {
+  step: number;
+  stepCount: number;
+  disabled: boolean;
+  label: string;
+  onChange: (step: number) => void;
+}) {
+  const db = bandDb(step, stepCount);
+  const ticks = [
+    { at: 0, text: formatDb(bandDb(0, stepCount)) },
+    { at: 0.5, text: "0" },
+    { at: 1, text: formatDb(bandDb(stepCount - 1, stepCount)) },
+  ];
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-text-muted">{label}</span>
+        <span className="font-mono text-xs tabular-nums text-text">{formatDb(db)}</span>
+      </div>
+      <input
+        type="range"
+        aria-label={label}
+        aria-valuetext={`${formatDb(db)} dB`}
+        min={0}
+        max={stepCount - 1}
+        step={1}
+        value={step}
+        disabled={disabled}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        className="h-5 w-full accent-accent disabled:opacity-50"
+      />
+      <div aria-hidden="true" className="relative h-5 font-mono text-xs tabular-nums text-text-faint">
+        {ticks.map((tick) => (
+          <span
+            key={tick.at}
+            className="absolute top-0 flex -translate-x-1/2 flex-col items-center"
+            style={{ left: `calc(8px + (100% - 16px) * ${tick.at})` }}
+          >
+            <span className="h-1.5 w-px bg-text-faint" />
+            {tick.text}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

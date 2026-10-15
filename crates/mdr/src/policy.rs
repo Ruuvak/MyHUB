@@ -38,7 +38,7 @@
 //!    |---|---|
 //!    | `22 09` LR battery, `22 0a` cradle battery | 0x29, 0x2a |
 //!    | `60 <t>` NC/ASM capability, `66 <t>` NC/ASM param | one that maps to `t` (0x6B gives 0x17) |
-//!    | `50 00` EQ capability, `56 00` EQ param | 0x50 |
+//!    | `50 00` EQ capability, `56 00` EQ param, `5a 00` EQ band info (Round 6) | 0x50 |
 //!    | `d0 <x>`, `d6 <x>` general setting, x = d1, d2 | function x |
 //!    | `12 02` codec | 0x12 |
 //!
@@ -406,7 +406,7 @@ impl Policy {
                     })
                 }
             }
-            [0x50 | 0x56, EQ_TYPE_PRESET] => {
+            [0x50 | 0x56 | 0x5A, EQ_TYPE_PRESET] => {
                 if ft.has_eq_type(EQ_TYPE_PRESET) {
                     Ok(())
                 } else {

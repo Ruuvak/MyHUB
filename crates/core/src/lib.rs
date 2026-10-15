@@ -232,6 +232,27 @@ pub struct EqPresetView {
     pub name: Option<String>,
 }
 
+/// Kind of one equalizer band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EqBandKindView {
+    /// A frequency band; `hz` is set.
+    Hz,
+    /// The Clear Bass slider.
+    ClearBass,
+    /// Other specific information.
+    Special,
+    Unknown,
+}
+
+/// One band of `EqView.bands`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqBandInfoView {
+    pub kind: EqBandKindView,
+    pub hz: Option<u32>,
+}
+
 /// Equalizer state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -241,6 +262,9 @@ pub struct EqView {
     pub presets: Vec<EqPresetView>,
     pub bands: Vec<u8>,
     pub step_count: u8,
+    /// What each band is, same order and length as `bands`; `None` when not read or the
+    /// length differs.
+    pub band_info: Option<Vec<EqBandInfoView>>,
 }
 
 /// Headset specific data (read only for now).

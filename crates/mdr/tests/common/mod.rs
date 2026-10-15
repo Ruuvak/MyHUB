@@ -53,10 +53,11 @@ pub const NCASM_RESTORE: &str = include_str!("../fixtures/ncasm-restore.txt");
 pub const TOGGLES: &str = include_str!("../fixtures/toggles.txt");
 pub const MULTIPOINT: &str = include_str!("../fixtures/multipoint.txt");
 pub const EQ_BANDS: &str = include_str!("../fixtures/eq-bands.txt");
+pub const EQ_EXTENDED: &str = include_str!("../fixtures/eq-extended.txt");
 pub const EQ_PRESET: &str = include_str!("../fixtures/eq-preset.txt");
 pub const EQ_RESTORE: &str = include_str!("../fixtures/eq-restore.txt");
 
-pub const ALL_FIXTURES: [&str; 9] = [
+pub const ALL_FIXTURES: [&str; 10] = [
     HANDSHAKE,
     FEATURES,
     NCASM_SET,
@@ -66,6 +67,7 @@ pub const ALL_FIXTURES: [&str; 9] = [
     EQ_BANDS,
     EQ_PRESET,
     EQ_RESTORE,
+    EQ_EXTENDED,
 ];
 
 pub fn load(text: &str) -> Vec<FixtureFrame> {

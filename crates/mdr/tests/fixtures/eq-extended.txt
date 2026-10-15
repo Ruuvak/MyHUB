@@ -1,0 +1,5 @@
+# MDR wire frames from DEVICE-WF-C710N.md Round 6 (own WF-C710N headset, EQEBB_GET_EXTENDED_INFO PRESET_EQ), checksums computed.
+# Format: one frame per line. '>' host to headset, '<' headset to host, then the full escaped wire frame as hex (3e ... 3c), optional '# comment'.
+> 3e 0c 00 00 00 00 02 5a 00 68 3c  # EQEBB_GET_EXTENDED_INFO PRESET_EQ
+< 3e 01 01 00 00 00 00 02 3c
+< 3e 0c 01 00 00 00 15 5b 00 06 10 00 01 01 01 90 01 03 e8 01 09 c4 01 18 9c 01 3d 2e 80 54 3c  # 6 entries: specific 1, 400, 1000, 2500, 6300, 16000 (0x3e escaped)

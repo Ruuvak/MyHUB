@@ -160,6 +160,12 @@ export interface EqPresetView {
   name: string | null;
 }
 
+export interface EqBandInfo {
+  kind: "hz" | "clearBass" | "special" | "unknown";
+  /** Centre frequency, set for kind "hz". */
+  hz: number | null;
+}
+
 export interface EqView {
   preset: number;
   presetName: string | null;
@@ -167,6 +173,8 @@ export interface EqView {
   /** Raw band steps, 0..stepCount-1; dB = step - (stepCount - 1) / 2. */
   bands: number[];
   stepCount: number;
+  /** What each band is, same order and length as `bands`; null when not read. Never assume where Clear Bass sits: find kind "clearBass". */
+  bandInfo: EqBandInfo[] | null;
 }
 
 /** Headset data (Sony WF-C710N), read only for now. */

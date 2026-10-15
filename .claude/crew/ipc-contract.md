@@ -127,12 +127,13 @@ DeviceDetail gains headset: HeadsetView | null (null for the G502; dpi, reportRa
 HeadsetView {
   battery: { left: Cell | null; right: Cell | null; case: Cell | null } | null
   ncAsm: { mode: "noiseCancelling" | "ambient"; ambientMode: "normal" | "voice"; level: number; levelMin: number; levelMax: number } | null   // range of the current ambient mode
-  eq: { preset: number; presetName: string | null; presets: { id: number; name: string | null }[]; bands: number[]; stepCount: number } | null
+  eq: { preset: number; presetName: string | null; presets: { id: number; name: string | null }[]; bands: number[]; stepCount: number; bandInfo: { kind: "hz" | "clearBass" | "special" | "unknown"; hz: number | null }[] | null } | null
   multipoint: boolean | null
   sidetone: boolean | null
   codec: string | null            // "SBC" | "AAC" | "LDAC" | "aptX" | "aptX HD" | "LC3", null while unsettled or unknown
   firmware: string | null
 }
+EQ bandInfo (read with `5a 00`, DEVICE-WF-C710N.md Round 6): one entry per element of eq.bands, same order and length; null when the headset did not answer or the length differs. kind "hz" carries hz (400, 1000, 2500, 6300, 16000 on the WF-C710N), "clearBass" is the band the Sony app draws as a separate slider, "special" and "unknown" are other entries. Clear Bass rule: find the entry of kind "clearBass" at runtime, never hardcode its index (it is index 0 on the WF-C710N). All bands use the same scale (stepCount 21, step 10 = 0 dB). Staging and set_eq_bands stay one array of all bands; the UI edits Clear Bass at its own index.
 Cell { percent: number; charging: "notCharging" | "charging" | "charged" | "unknown" }
 Preset names are stable lowercase keys the UI translates: off, bright, excited, mellow, relaxed, vocal, treble, bass, speech, custom, user1, user2; null for an id not in that list.
 Summary and battery: batteryPercent and battery.percent are the lower of left and right; battery.charging is "charging" when either bud charges, "full" when both are charged, "discharging" when neither charges, else "unknown"; level null, externalPower false. The case is only in headset.battery.case.

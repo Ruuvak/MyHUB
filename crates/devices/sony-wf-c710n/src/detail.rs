@@ -1,11 +1,13 @@
 //! Maps a [`Snapshot`] to the generic UI model of `myhub-core`.
 
 use mdr::messages::eq_preset_name;
-use mdr::messages::{AmbientMode, AudioCodec, BatteryLr, Cell, ChargingStatus, NcAsmMode};
+use mdr::messages::{
+    AmbientMode, AudioCodec, BatteryLr, Cell, ChargingStatus, EqBandEntry, NcAsmMode,
+};
 use myhub_core::{
     AmbientModeView, BatteryInfo, CellCharging, ChargingState, Connection, DeviceDetail,
-    DeviceKind, DeviceSummary, EqPresetView, EqView, HeadsetBattery, HeadsetCell, HeadsetView,
-    NcAsmModeView, NcAsmView,
+    DeviceKind, DeviceSummary, EqBandInfoView, EqBandKindView, EqPresetView, EqView,
+    HeadsetBattery, HeadsetCell, HeadsetView, NcAsmModeView, NcAsmView,
 };
 
 use crate::snapshot::Snapshot;
@@ -67,6 +69,16 @@ fn pair_charging(b: &BatteryLr) -> ChargingState {
     }
 }
 
+fn band_info_view(e: EqBandEntry) -> EqBandInfoView {
+    let (kind, hz) = match e {
+        EqBandEntry::Hz(hz) => (EqBandKindView::Hz, Some(hz)),
+        EqBandEntry::ClearBass => (EqBandKindView::ClearBass, None),
+        EqBandEntry::Special(_) => (EqBandKindView::Special, None),
+        EqBandEntry::Other { .. } => (EqBandKindView::Unknown, None),
+    };
+    EqBandInfoView { kind, hz }
+}
+
 fn headset_view(s: &Snapshot) -> HeadsetView {
     let nc_asm = s.ncasm.as_ref().map(|nc| {
         let p = &nc.param;
@@ -103,6 +115,11 @@ fn headset_view(s: &Snapshot) -> HeadsetView {
             .collect(),
         bands: eq.param.bands.clone(),
         step_count: eq.capability.step_count(),
+        band_info: eq
+            .band_info
+            .as_ref()
+            .filter(|i| i.entries.len() == eq.param.bands.len())
+            .map(|i| i.entries.iter().copied().map(band_info_view).collect()),
     });
     let battery = (s.battery.is_some() || s.cradle.is_some()).then(|| HeadsetBattery {
         left: s.battery.map(|b| view_cell(b.left)),

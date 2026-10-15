@@ -242,6 +242,7 @@ export const en = {
   "headset.ambient.level": "Ambient level",
   "headset.eq.title": "Equalizer",
   "headset.eq.band": "Band {n}",
+  "headset.eq.clearBass": "Clear Bass",
   "headset.eq.bands": "Equalizer bands in dB",
   "headset.eq.presetUnknown": "Preset {n}",
   "headset.eq.preset.off": "Off",
