@@ -121,8 +121,10 @@ mod tests {
         let a = BtAddress::new(0x0011_2233_44FC);
         assert_eq!(a.to_string(), "**:**:**:**:**:FC");
         let d = PairedDevice::new("x".into(), a, false);
-        let shown = format!("{a:?} {d:?}");
-        assert!(!shown.contains("33") && !shown.contains("44"), "{shown}");
-        assert!(shown.contains("FC"));
+        assert_eq!(format!("{a:?}"), "BtAddress(**:**:**:**:**:FC)");
+        assert_eq!(
+            format!("{d:?}"),
+            "PairedDevice { name: \"x\", connected: false, address: BtAddress(**:**:**:**:**:FC) }"
+        );
     }
 }

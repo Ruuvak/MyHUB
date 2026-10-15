@@ -6,8 +6,8 @@ import type { AppInfo, DeviceDetail, DevicePrefs, DeviceSummary, SaveProfileArgs
 /** Typed wrapper over the Tauri commands and events. Outside Tauri it falls back to a dev preview. */
 
 // DEV PREVIEW ONLY: used when the UI runs in a plain browser (no Tauri). Settings live in memory
-// and are lost on reload. Devices come from a fixture only when the URL has ?demo=g502x or
-// ?demo=g502x-off, otherwise the list is empty. Never reached inside the real app.
+// and are lost on reload. Devices come from a fixture only when the URL has ?demo=g502x,
+// ?demo=g502x-off, ?demo=sony, ?demo=sony-off or ?demo=all (both devices), otherwise the list is empty. Never reached inside the real app.
 const previewDefaults: Settings = {
   theme: "system",
   language: "auto",
@@ -29,7 +29,7 @@ function previewDemo(): string | null {
 function loadFixture() {
   // Constant-folded away in production builds, so the fixture chunk is not emitted at all.
   if (!import.meta.env.DEV) throw new Error("Preview fixtures are available in dev builds only");
-  return import("../dev/g502x.fixture");
+  return import("../dev/demo");
 }
 
 const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
@@ -103,8 +103,8 @@ function withPreviewSaved(detail: DeviceDetail): DeviceDetail {
 /** Dev preview only: the fixture with applied values and a readOnly flag derived like the backend does. */
 async function previewDetail(id: string): Promise<DeviceDetail | null> {
   if (!previewDemo()) return null;
-  const detail = (await loadFixture()).demoDetail(previewDemo());
-  if (!detail || detail.id !== id) return null;
+  const detail = (await loadFixture()).demoDetails(previewDemo()).find((d) => d.id === id);
+  if (!detail) return null;
   const connected = detail.connection === "connected";
   return {
     ...detail,

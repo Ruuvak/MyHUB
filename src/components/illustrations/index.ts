@@ -65,8 +65,8 @@ const registry: Record<string, Partial<Record<IllustrationView, IllustrationDef>
     hero: generic.mouse,
   },
   receiver: { hero: renderDef(receiver1x, receiver2x) },
-  // Not tied to a device yet.
   earbuds: { hero: renderDef(earbuds1x, earbuds2x) },
+  "wf-c710n": { hero: renderDef(earbuds1x, earbuds2x) },
 };
 
 /**

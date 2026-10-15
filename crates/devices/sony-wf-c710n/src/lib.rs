@@ -11,14 +11,18 @@
 //! requested.
 
 mod describe;
+mod detail;
 mod session;
 mod snapshot;
 
 use myhub_rfcomm::{PairedDevice, RfcommError, RfcommLink, ServiceUuid, connect};
 
 pub use describe::describe;
+pub use detail::to_detail;
 pub use session::{READ_POLL_MS, REPLY_TIMEOUT, Session, SessionError};
-pub use snapshot::{EqSnapshot, Identity, NcAsmSnapshot, Snapshot, handshake, read_snapshot};
+pub use snapshot::{
+    Applied, EqSnapshot, Identity, Item, NcAsmSnapshot, Snapshot, handshake, read_snapshot, reread,
+};
 
 /// Stable device ID used by the UI and the app's per-device files.
 pub const DEVICE_ID: &str = "sony-wf-c710n";

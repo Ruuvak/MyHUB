@@ -27,7 +27,7 @@ export const pl: Messages = {
 
   "empty.title": "Brak urządzeń",
   "empty.body":
-    "Podłącz obsługiwany odbiornik i włącz urządzenie. Pierwszym obsługiwanym urządzeniem jest Logitech G502 X LIGHTSPEED.",
+    "Podłącz obsługiwany odbiornik lub sparuj obsługiwane słuchawki i włącz urządzenie. Obsługiwane: Logitech G502 X LIGHTSPEED, Sony WF-C710N.",
 
   "settings.title": "Ustawienia",
   "settings.appearance": "Wygląd",
@@ -56,7 +56,7 @@ export const pl: Messages = {
   "about.title": "O aplikacji",
   "about.version": "Wersja",
   "about.description":
-    "MyHUB zarządza urządzeniami peryferyjnymi w jednym oknie, bez oprogramowania producenta. Obecnie obsługiwane: Logitech G502 X LIGHTSPEED.",
+    "MyHUB zarządza urządzeniami peryferyjnymi w jednym oknie, bez oprogramowania producenta. Obecnie obsługiwane: Logitech G502 X LIGHTSPEED, Sony WF-C710N (tylko odczyt).",
   "about.safety": "MyHUB nigdy nie zmienia firmware'u urządzeń. Ustawienia są przechowywane na tym komputerze.",
 
   "action.open": "Otwórz okno",
@@ -98,7 +98,7 @@ export const pl: Messages = {
   "tile.dpiLevels": "Poziomy DPI",
   "tile.readOnly": "Tylko odczyt",
 
-  "note.readOnly": "Tylko odczyt. MyHUB nie zapisuje nic w pamięci myszy.",
+  "note.readOnly": "Tylko odczyt. MyHUB nic nie zapisuje w urządzeniu.",
   "note.editingLater": "Edycja w kolejnej wersji",
 
   "tabs.label": "Sekcje urządzenia",
@@ -231,4 +231,39 @@ export const pl: Messages = {
   "binding.special.wheelRight": "Przewiń w prawo",
   "binding.special.profileCycle": "Przełączanie profili",
   "binding.special.unknown": "Specjalny 0x{code}",
+
+  "headset.battery.title": "Bateria",
+  "headset.battery.left": "Lewa",
+  "headset.battery.right": "Prawa",
+  "headset.battery.case": "Etui",
+  "headset.sound.title": "Tryb dźwięku",
+  "headset.sound.nc": "Redukcja szumów",
+  "headset.sound.ambient": "Dźwięk otoczenia",
+  "headset.ambient.normal": "Normalny",
+  "headset.ambient.voice": "Skupienie na głosie",
+  "headset.ambient.level": "Poziom dźwięku otoczenia",
+  "headset.eq.title": "Korektor",
+  "headset.eq.band": "Pasmo {n}",
+  "headset.eq.bands": "Pasma korektora w dB",
+  "headset.eq.presetUnknown": "Ustawienie {n}",
+  "headset.eq.preset.off": "Wyłączony",
+  "headset.eq.preset.bright": "Jasny",
+  "headset.eq.preset.excited": "Żywy",
+  "headset.eq.preset.mellow": "Łagodny",
+  "headset.eq.preset.relaxed": "Relaksujący",
+  "headset.eq.preset.vocal": "Wokal",
+  "headset.eq.preset.treble": "Wzmocnione wysokie",
+  "headset.eq.preset.bass": "Wzmocniony bas",
+  "headset.eq.preset.speech": "Mowa",
+  "headset.eq.preset.custom": "Własny",
+  "headset.eq.preset.user1": "Użytkownik 1",
+  "headset.eq.preset.user2": "Użytkownik 2",
+  "headset.settings.title": "Ustawienia",
+  "headset.multipoint": "Multipoint",
+  "headset.sidetone": "Słyszenie własnego głosu",
+  "headset.codec": "Kodek",
+  "headset.firmware": "Oprogramowanie sprzętowe",
+  "headset.on": "Włączone",
+  "headset.off": "Wyłączone",
+  "headset.note": "Podgląd tylko do odczytu. Zmiany ustawień słuchawek dojdą w kolejnej wersji.",
 };

@@ -47,6 +47,7 @@ pub fn to_detail(snapshot: &Snapshot, link_up: bool, updated_at_ms: u64) -> Devi
             current_hz: snapshot.report_rate.current_hz,
         }),
         onboard: Some(onboard_view(snapshot)),
+        headset: None,
     }
 }
 

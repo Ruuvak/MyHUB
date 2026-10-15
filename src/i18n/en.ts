@@ -25,7 +25,7 @@ export const en = {
 
   "empty.title": "No devices",
   "empty.body":
-    "Plug in a supported receiver and switch the device on. The first supported device is the Logitech G502 X LIGHTSPEED.",
+    "Plug in a supported receiver or pair a supported headset, then switch the device on. Supported: Logitech G502 X LIGHTSPEED, Sony WF-C710N.",
 
   "settings.title": "Settings",
   "settings.appearance": "Appearance",
@@ -54,7 +54,7 @@ export const en = {
   "about.title": "About",
   "about.version": "Version",
   "about.description":
-    "MyHUB manages peripherals in one window, without the manufacturer's software. Currently supported: Logitech G502 X LIGHTSPEED.",
+    "MyHUB manages peripherals in one window, without the manufacturer's software. Currently supported: Logitech G502 X LIGHTSPEED, Sony WF-C710N (read-only).",
   "about.safety": "MyHUB never modifies device firmware. Settings are stored on this PC.",
 
   "action.open": "Open window",
@@ -96,7 +96,7 @@ export const en = {
   "tile.dpiLevels": "DPI levels",
   "tile.readOnly": "Read-only",
 
-  "note.readOnly": "Read-only. MyHUB writes nothing to the mouse.",
+  "note.readOnly": "Read-only. MyHUB writes nothing to the device.",
   "note.editingLater": "Editing comes in a later version",
 
   "tabs.label": "Device sections",
@@ -229,6 +229,41 @@ export const en = {
   "binding.special.wheelRight": "Scroll right",
   "binding.special.profileCycle": "Profile cycle",
   "binding.special.unknown": "Special 0x{code}",
+
+  "headset.battery.title": "Battery",
+  "headset.battery.left": "Left",
+  "headset.battery.right": "Right",
+  "headset.battery.case": "Case",
+  "headset.sound.title": "Sound mode",
+  "headset.sound.nc": "Noise cancelling",
+  "headset.sound.ambient": "Ambient sound",
+  "headset.ambient.normal": "Normal",
+  "headset.ambient.voice": "Voice focus",
+  "headset.ambient.level": "Ambient level",
+  "headset.eq.title": "Equalizer",
+  "headset.eq.band": "Band {n}",
+  "headset.eq.bands": "Equalizer bands in dB",
+  "headset.eq.presetUnknown": "Preset {n}",
+  "headset.eq.preset.off": "Off",
+  "headset.eq.preset.bright": "Bright",
+  "headset.eq.preset.excited": "Excited",
+  "headset.eq.preset.mellow": "Mellow",
+  "headset.eq.preset.relaxed": "Relaxed",
+  "headset.eq.preset.vocal": "Vocal",
+  "headset.eq.preset.treble": "Treble boost",
+  "headset.eq.preset.bass": "Bass boost",
+  "headset.eq.preset.speech": "Speech",
+  "headset.eq.preset.custom": "Custom",
+  "headset.eq.preset.user1": "User 1",
+  "headset.eq.preset.user2": "User 2",
+  "headset.settings.title": "Settings",
+  "headset.multipoint": "Multipoint",
+  "headset.sidetone": "Sidetone",
+  "headset.codec": "Codec",
+  "headset.firmware": "Firmware",
+  "headset.on": "On",
+  "headset.off": "Off",
+  "headset.note": "Read-only preview. Changing the headset settings comes in a later version.",
 } as const satisfies Record<string, string>;
 
 /** Every message key, each mapped to a plain string in every language. */

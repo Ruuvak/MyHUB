@@ -12,7 +12,9 @@ import type { DeviceDetail, DeviceSummary } from "../../lib/types";
 import { useDeviceDetail } from "../../state/devices";
 import type { DeviceUi } from "../../state/deviceUi";
 import { Badge, SegmentedControl, Skeleton } from "../../ui";
-import { WirelessReceiverIcon } from "../../ui/icons";
+import { TransportIcon } from "../../components/device/TransportIcon";
+import { HeadsetPanel } from "./HeadsetPanel";
+import { lowestBud } from "../../lib/headset";
 import { ButtonsTab } from "./ButtonsTab";
 import { PerformanceTab } from "./PerformanceTab";
 import { ProfilesTab } from "./ProfilesTab";
@@ -44,25 +46,35 @@ export function DeviceDetailView({ summary, ui, onUiChange, onOpenSettings }: De
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
       <Hero detail={detail} summary={summary} refreshing={refreshing} onRefresh={refresh} />
 
-      <div className="flex">
-        <SegmentedControl
-          label={t("tabs.label")}
-          value={ui.tab}
-          options={tabOptions}
-          onChange={(tab) => onUiChange({ tab })}
-        />
-      </div>
+      {detail.headset ? (
+        <div className="animate-page">
+          <HeadsetPanel detail={detail} />
+        </div>
+      ) : detail.dpi || detail.onboard ? (
+        <>
+          <div className="flex">
+            <SegmentedControl
+              label={t("tabs.label")}
+              value={ui.tab}
+              options={tabOptions}
+              onChange={(tab) => onUiChange({ tab })}
+            />
+          </div>
 
-      <div key={ui.tab} className="animate-page">
-        {ui.tab === "performance" ? <PerformanceTab detail={detail} onDetail={applyDetail} onOpenSettings={onOpenSettings} /> : null}
-        {ui.tab === "buttons" ? <ButtonsTab detail={detail} ui={ui} onUiChange={onUiChange} /> : null}
-        {ui.tab === "profiles" ? <ProfilesTab detail={detail} ui={ui} onUiChange={onUiChange} /> : null}
-      </div>
+          <div key={ui.tab} className="animate-page">
+            {ui.tab === "performance" ? <PerformanceTab detail={detail} onDetail={applyDetail} onOpenSettings={onOpenSettings} /> : null}
+            {ui.tab === "buttons" ? <ButtonsTab detail={detail} ui={ui} onUiChange={onUiChange} /> : null}
+            {ui.tab === "profiles" ? <ProfilesTab detail={detail} ui={ui} onUiChange={onUiChange} /> : null}
+          </div>
 
-      {detail.readOnly ? (
-        <ReadOnlyNote />
+          {detail.readOnly ? (
+            <ReadOnlyNote />
+          ) : (
+            <ReadOnlyNote icon="info" text={detail.onboard?.mode === "host" ? t("note.temporary") : t("note.flash")} />
+          )}
+        </>
       ) : (
-        <ReadOnlyNote icon="info" text={detail.onboard?.mode === "host" ? t("note.temporary") : t("note.flash")} />
+        <p className="text-base text-text-muted">{t("devices.noSettings")}</p>
       )}
     </div>
   );
@@ -82,8 +94,8 @@ function Hero({
   const t = useT();
   const ago = useUpdatedAgo(detail.updatedAtMs);
   const connected = detail.connection === "connected";
-  const percent = batteryOf(detail, summary);
-  const onPower = connected && isOnPower(detail.battery);
+  const percent = (detail.headset ? lowestBud(detail.headset) : null) ?? batteryOf(detail, summary);
+  const onPower = connected && !detail.headset && isOnPower(detail.battery);
   const levelWord = levelKey(detail.battery);
 
   return (
@@ -95,7 +107,7 @@ function Hero({
           {connected ? <ModeChip mode={detail.onboard?.mode} activeProfile={detail.onboard?.activeProfile} /> : null}
         </div>
         <p className="flex items-center gap-1.5 text-sm text-text-muted">
-          {detail.transport === "LIGHTSPEED" ? <WirelessReceiverIcon size={16} className="shrink-0" /> : null}
+          <TransportIcon transport={detail.transport} />
           <span className="truncate">
             {t("device.subline", { vendor: detail.vendor, transport: detail.transport, protocol: detail.protocol })}
           </span>

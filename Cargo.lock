@@ -2181,9 +2181,11 @@ dependencies = [
  "hidpp",
  "logitech-g502x",
  "myhub-core",
+ "myhub-rfcomm",
  "myhub-transport",
  "serde",
  "serde_json",
+ "sony-wf-c710n",
  "sys-locale",
  "tauri",
  "tauri-build",
@@ -3391,6 +3393,7 @@ name = "sony-wf-c710n"
 version = "0.1.0"
 dependencies = [
  "mdr",
+ "myhub-core",
  "myhub-rfcomm",
  "serde",
  "serde_json",

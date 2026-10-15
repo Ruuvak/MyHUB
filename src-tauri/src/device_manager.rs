@@ -46,6 +46,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backup;
 use crate::settings::{self, Language, Settings, SettingsState};
+use crate::sony::{SonyCommand, SonyWorker};
 use crate::tray;
 
 pub const DEVICES_CHANGED_EVENT: &str = "devices-changed";
@@ -95,16 +96,98 @@ const WRITE_INTERVAL: Duration = Duration::from_millis(250);
 /// spy stop, switch, read-back; about 3.85 s in all) plus margin. The spy stop is
 /// not retried while the app shuts down.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+/// How long shutdown waits for the headset worker.
+const SONY_SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 /// Pause before the one retry of a failed spy stop, and between later attempts
 /// from the pass loop.
 const SPY_STOP_RETRY: Duration = Duration::from_millis(200);
 const SPY_STALE_RETRY: Duration = Duration::from_secs(5);
 
-/// What the commands read. Written only by the worker.
+/// Which worker owns a published detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slot {
+    /// The G502 worker ("device-manager").
+    Logitech,
+    /// The headset worker ("sony-worker").
+    Sony,
+}
+
+/// What the commands read: one detail per device, each written only by its own
+/// worker. The list order is fixed: the G502 first, then the headset.
 #[derive(Debug, Default)]
 pub struct ManagerState {
     detail: Option<DeviceDetail>,
-    devices: Vec<DeviceSummary>,
+    sony: Option<DeviceDetail>,
+}
+
+impl ManagerState {
+    fn slot_mut(&mut self, slot: Slot) -> &mut Option<DeviceDetail> {
+        match slot {
+            Slot::Logitech => &mut self.detail,
+            Slot::Sony => &mut self.sony,
+        }
+    }
+
+    /// Summaries of every device seen so far, G502 first.
+    fn summaries(&self) -> Vec<DeviceSummary> {
+        self.detail
+            .iter()
+            .chain(self.sony.iter())
+            .map(|d| d.summary.clone())
+            .collect()
+    }
+
+    /// The detail with this id.
+    pub(crate) fn find(&self, id: &str) -> Option<DeviceDetail> {
+        self.detail
+            .iter()
+            .chain(self.sony.iter())
+            .find(|d| d.summary.id == id)
+            .cloned()
+    }
+
+    /// The device the tray shows: the G502 while it is known, else the headset.
+    fn tray_detail(&self) -> Option<DeviceDetail> {
+        self.detail.clone().or_else(|| self.sony.clone())
+    }
+}
+
+/// Where a command for a device id goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Logitech,
+    Sony,
+}
+
+fn route_of(id: &str) -> Route {
+    if id == sony_wf_c710n::DEVICE_ID {
+        Route::Sony
+    } else {
+        Route::Logitech
+    }
+}
+
+/// The two worker inboxes. A refresh goes to the worker that owns the id.
+struct Router {
+    logitech: Sender<Command>,
+    sony: Sender<SonyCommand>,
+}
+
+impl Router {
+    fn refresh(&self, id: &str) -> Option<Receiver<Option<DeviceDetail>>> {
+        let (reply, answer) = mpsc::channel();
+        let sent = match route_of(id) {
+            Route::Sony => self.sony.send(SonyCommand::Refresh { reply }).is_ok(),
+            Route::Logitech => self
+                .logitech
+                .send(Command::Refresh {
+                    id: id.to_owned(),
+                    reply,
+                })
+                .is_ok(),
+        };
+        sent.then_some(answer)
+    }
 }
 
 enum Command {
@@ -194,15 +277,25 @@ pub struct DeviceManager {
     state: Arc<Mutex<ManagerState>>,
     config_dir: Option<PathBuf>,
     commands: Sender<Command>,
+    sony_commands: Sender<SonyCommand>,
     shutdown: Arc<AtomicBool>,
     flash_in_flight: Arc<AtomicBool>,
     thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
+    sony_thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A reply channel that already holds the error `code`: the headset is read
+/// only, so a write command for it is refused without reaching any worker.
+fn refused_reply<T>(code: &str) -> Receiver<Result<T, String>> {
+    let (reply, answer) = mpsc::channel();
+    let _ = reply.send(Err(code.to_owned()));
+    answer
 }
 
 impl DeviceManager {
@@ -216,6 +309,27 @@ impl DeviceManager {
         let (done_tx, done_rx) = mpsc::channel();
         let config_dir = app.path().app_config_dir().ok();
         let data_dir = app.path().app_data_dir().ok();
+        let (sony_commands, sony_rx) = mpsc::channel();
+        let (sony_done_tx, sony_done_rx) = mpsc::channel();
+        let sony_worker = SonyWorker {
+            app: app.clone(),
+            state: Arc::clone(&state),
+            commands: sony_rx,
+            shutdown: Arc::clone(&shutdown),
+        };
+        let sony_spawned = thread::Builder::new()
+            .name("sony-worker".into())
+            .spawn(move || {
+                sony_worker.run();
+                let _ = sony_done_tx.send(());
+            });
+        let sony_thread = match sony_spawned {
+            Ok(handle) => Some((handle, sony_done_rx)),
+            Err(e) => {
+                eprintln!("myhub: cannot start the headset worker: {e}");
+                None
+            }
+        };
 
         let worker = Worker {
             app,
@@ -247,9 +361,11 @@ impl DeviceManager {
             state,
             config_dir,
             commands,
+            sony_commands,
             shutdown,
             flash_in_flight,
             thread: Mutex::new(thread),
+            sony_thread: Mutex::new(sony_thread),
         }
     }
 
@@ -261,6 +377,9 @@ impl DeviceManager {
         id: &str,
         op: WriteOp,
     ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        if route_of(id) == Route::Sony {
+            return Some(refused_reply("writesDisabled"));
+        }
         let (reply, answer) = mpsc::channel();
         self.commands
             .send(Command::Write {
@@ -284,6 +403,9 @@ impl DeviceManager {
         id: &str,
         enter: bool,
     ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        if route_of(id) == Route::Sony {
+            return Some(refused_reply("writesDisabled"));
+        }
         let (reply, answer) = mpsc::channel();
         self.commands
             .send(Command::Mode {
@@ -303,6 +425,9 @@ impl DeviceManager {
         id: &str,
         request: SaveRequest,
     ) -> Option<Receiver<Result<SaveResult, String>>> {
+        if route_of(id) == Route::Sony {
+            return Some(refused_reply("writesDisabled"));
+        }
         let (reply, answer) = mpsc::channel();
         self.commands
             .send(Command::Save {
@@ -330,33 +455,26 @@ impl DeviceManager {
     }
 
     pub fn devices(&self) -> Vec<DeviceSummary> {
-        lock(&self.state).devices.clone()
+        lock(&self.state).summaries()
     }
 
     pub fn detail(&self, id: &str) -> Option<DeviceDetail> {
-        lock(&self.state)
-            .detail
-            .as_ref()
-            .filter(|d| d.summary.id == id)
-            .cloned()
+        lock(&self.state).find(id)
     }
 
     /// Asks the worker to re-read the device. The answer arrives on the
     /// returned channel; `None` when the worker is gone.
     pub fn request_refresh(&self, id: &str) -> Option<Receiver<Option<DeviceDetail>>> {
-        let (reply, answer) = mpsc::channel();
-        self.commands
-            .send(Command::Refresh {
-                id: id.to_owned(),
-                reply,
-            })
-            .ok()
-            .map(|()| answer)
+        Router {
+            logitech: self.commands.clone(),
+            sony: self.sony_commands.clone(),
+        }
+        .refresh(id)
     }
 
     /// Re-applies the tray status text, e.g. after a language change.
     pub fn refresh_tray(&self, app: &AppHandle) {
-        let detail = lock(&self.state).detail.clone();
+        let detail = lock(&self.state).tray_detail();
         update_tray(app, detail.as_ref());
     }
 
@@ -369,6 +487,19 @@ impl DeviceManager {
             eprintln!("myhub: a flash write is still running after {FLASH_SHUTDOWN_WAIT:?}");
         }
         let _ = self.commands.send(Command::Wake);
+        let _ = self.sony_commands.send(SonyCommand::Wake);
+        // The headset worker sees the flag within one poll (200 ms); a connect
+        // in progress is not interrupted, so the wait is bounded.
+        if let Some((handle, done)) = lock(&self.sony_thread).take() {
+            match done.recv_timeout(SONY_SHUTDOWN_WAIT) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                    let _ = handle.join();
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    eprintln!("myhub: headset worker did not stop in time");
+                }
+            }
+        }
         if let Some((handle, done)) = lock(&self.thread).take() {
             match done.recv_timeout(SHUTDOWN_WAIT) {
                 Ok(()) | Err(RecvTimeoutError::Disconnected) => {
@@ -448,7 +579,7 @@ fn retry_delay(failures: u32) -> Duration {
         .min(READ_RETRY_MAX)
 }
 
-fn clock_ms() -> u64 {
+pub(crate) fn clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -2499,30 +2630,51 @@ impl Worker {
     /// explicit refresh).
     fn publish(&self, detail: Option<DeviceDetail>, force: bool) {
         let detail = detail.map(|d| self.finalize(d));
-        let (change, summaries) = {
-            let mut state = lock(&self.state);
-            let change = changes(state.detail.as_ref(), detail.as_ref());
-            state.devices = detail.iter().map(|d| d.summary.clone()).collect();
-            state.detail = detail.clone();
-            (change, state.devices.clone())
-        };
-        if self.stopping() {
-            return;
-        }
-        if change.summaries
-            && let Err(e) = self.app.emit(DEVICES_CHANGED_EVENT, &summaries)
-        {
-            eprintln!("myhub: cannot emit {DEVICES_CHANGED_EVENT}: {e}");
-        }
-        if let Some(detail) = detail.as_ref()
-            && (change.detail || force)
-            && let Err(e) = self.app.emit(DEVICE_DETAIL_CHANGED_EVENT, detail)
-        {
-            eprintln!("myhub: cannot emit {DEVICE_DETAIL_CHANGED_EVENT}: {e}");
-        }
-        if change.summaries || change.detail {
-            update_tray(&self.app, detail.as_ref());
-        }
+        publish_slot(
+            &self.app,
+            &self.state,
+            self.stopping(),
+            Slot::Logitech,
+            detail,
+            force,
+        );
+    }
+}
+
+/// Stores the new detail of one device and emits events for what changed. The
+/// summary list always holds every known device. `force` emits the detail event
+/// even when only the timestamp changed (an explicit refresh). A `None` clears the
+/// device's slot.
+pub(crate) fn publish_slot(
+    app: &AppHandle,
+    state: &Mutex<ManagerState>,
+    stopping: bool,
+    slot: Slot,
+    detail: Option<DeviceDetail>,
+    force: bool,
+) {
+    let (change, summaries, tray) = {
+        let mut state = lock(state);
+        let change = changes(state.slot_mut(slot).as_ref(), detail.as_ref());
+        *state.slot_mut(slot) = detail.clone();
+        (change, state.summaries(), state.tray_detail())
+    };
+    if stopping {
+        return;
+    }
+    if change.summaries
+        && let Err(e) = app.emit(DEVICES_CHANGED_EVENT, &summaries)
+    {
+        eprintln!("myhub: cannot emit {DEVICES_CHANGED_EVENT}: {e}");
+    }
+    if let Some(detail) = detail.as_ref()
+        && (change.detail || force)
+        && let Err(e) = app.emit(DEVICE_DETAIL_CHANGED_EVENT, detail)
+    {
+        eprintln!("myhub: cannot emit {DEVICE_DETAIL_CHANGED_EVENT}: {e}");
+    }
+    if change.summaries || change.detail {
+        update_tray(app, tray.as_ref());
     }
 }
 
@@ -2962,6 +3114,65 @@ mod tests {
         let later = Instant::now() + BATTERY_REFRESH;
         device.step(later).expect("step");
         assert_eq!(handle.borrow().writes, writes + 1);
+    }
+
+    #[test]
+    fn registry_lists_both_devices_and_finds_each_by_id() {
+        let g502 = detail_for(Connection::Connected, Some(55));
+        let mut headset = g502.clone();
+        headset.summary.id = sony_wf_c710n::DEVICE_ID.to_owned();
+        headset.summary.name = "WF-C710N".to_owned();
+        headset.summary.kind = myhub_core::DeviceKind::Headset;
+        headset.summary.battery_percent = Some(80);
+        let mut state = ManagerState::default();
+        // The headset is published first: the G502 still comes first in the list.
+        *state.slot_mut(Slot::Sony) = Some(headset);
+        assert_eq!(state.summaries().len(), 1);
+        *state.slot_mut(Slot::Logitech) = Some(g502);
+        let ids: Vec<_> = state.summaries().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, [DEVICE_ID, sony_wf_c710n::DEVICE_ID]);
+        assert_eq!(
+            state.find(sony_wf_c710n::DEVICE_ID).unwrap().summary.name,
+            "WF-C710N"
+        );
+        assert_eq!(
+            state.find(DEVICE_ID).unwrap().summary.battery_percent,
+            Some(55)
+        );
+        assert!(state.find("nope").is_none());
+        // The tray follows the G502 while it is known, else the headset.
+        assert_eq!(state.tray_detail().unwrap().summary.id, DEVICE_ID);
+        *state.slot_mut(Slot::Logitech) = None;
+        assert_eq!(
+            state.tray_detail().unwrap().summary.id,
+            sony_wf_c710n::DEVICE_ID
+        );
+        assert_eq!(
+            status_text(state.tray_detail().as_ref(), Language::En).as_deref(),
+            Some("WF-C710N: 80%")
+        );
+    }
+
+    #[test]
+    fn refresh_goes_to_the_worker_that_owns_the_id() {
+        let (logitech, logitech_rx) = mpsc::channel();
+        let (sony, sony_rx) = mpsc::channel();
+        let router = Router { logitech, sony };
+        assert!(router.refresh(sony_wf_c710n::DEVICE_ID).is_some());
+        assert!(matches!(
+            sony_rx.try_recv(),
+            Ok(SonyCommand::Refresh { .. })
+        ));
+        assert!(logitech_rx.try_recv().is_err());
+        assert!(router.refresh(DEVICE_ID).is_some());
+        assert!(matches!(
+            logitech_rx.try_recv(),
+            Ok(Command::Refresh { id, .. }) if id == DEVICE_ID
+        ));
+        assert!(sony_rx.try_recv().is_err());
+        // Write commands for the read only headset never reach a worker.
+        let refusal = refused_reply::<DeviceDetail>("writesDisabled");
+        assert_eq!(refusal.try_recv().unwrap().unwrap_err(), "writesDisabled");
     }
 
     fn detail_for(connection: Connection, percent: Option<u8>) -> DeviceDetail {

@@ -24,3 +24,5 @@ myhub-transport = { workspace = true }
 logitech-g502x = { workspace = true }
 hidpp = { workspace = true }
 tauri-plugin-autostart = "2"
+myhub-rfcomm = { workspace = true }
+sony-wf-c710n = { path = "../crates/devices/sony-wf-c710n" }

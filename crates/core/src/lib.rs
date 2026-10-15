@@ -58,6 +58,8 @@ pub struct DeviceDetail {
     pub dpi: Option<DpiInfo>,
     pub report_rate: Option<ReportRateInfo>,
     pub onboard: Option<OnboardView>,
+    /// Headset data (Sony WF-C710N); `None` for devices that are not headsets.
+    pub headset: Option<HeadsetView>,
 }
 
 impl DeviceDetail {
@@ -165,6 +167,94 @@ pub struct OnboardView {
     /// that profile's sector is enabled in the directory; `None` otherwise.
     /// Only such a profile can be saved to the mouse.
     pub writable_profile: Option<u8>,
+}
+
+/// Charging state of one headset cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CellCharging {
+    NotCharging,
+    Charging,
+    Charged,
+    Unknown,
+}
+
+/// One headset cell: a bud or the case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadsetCell {
+    pub percent: u8,
+    pub charging: CellCharging,
+}
+
+/// Per cell battery of a true wireless headset; a cell is `None` when not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadsetBattery {
+    pub left: Option<HeadsetCell>,
+    pub right: Option<HeadsetCell>,
+    pub case: Option<HeadsetCell>,
+}
+
+/// Noise cancelling or ambient sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NcAsmModeView {
+    NoiseCancelling,
+    Ambient,
+}
+
+/// Ambient sound flavour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AmbientModeView {
+    Normal,
+    Voice,
+}
+
+/// Noise cancelling / ambient sound state with the level range of the current ambient mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NcAsmView {
+    pub mode: NcAsmModeView,
+    pub ambient_mode: AmbientModeView,
+    pub level: u8,
+    pub level_min: u8,
+    pub level_max: u8,
+}
+
+/// One equalizer preset the headset offers. `name` is a stable lowercase key
+/// (`off`, `bright`, ..., `custom`, `user1`, `user2`) the UI translates; `None` when unlisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqPresetView {
+    pub id: u8,
+    pub name: Option<String>,
+}
+
+/// Equalizer state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqView {
+    pub preset: u8,
+    pub preset_name: Option<String>,
+    pub presets: Vec<EqPresetView>,
+    pub bands: Vec<u8>,
+    pub step_count: u8,
+}
+
+/// Headset specific data (read only for now).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadsetView {
+    pub battery: Option<HeadsetBattery>,
+    pub nc_asm: Option<NcAsmView>,
+    pub eq: Option<EqView>,
+    pub multipoint: Option<bool>,
+    pub sidetone: Option<bool>,
+    /// Codec in use, e.g. `AAC`.
+    pub codec: Option<String>,
+    pub firmware: Option<String>,
 }
 
 /// One onboard profile.
@@ -283,6 +373,7 @@ mod tests {
                 options_hz: vec![1000, 500],
                 current_hz: 1000,
             }),
+            headset: None,
             onboard: Some(OnboardView {
                 mode: Some(OnboardMode::Host),
                 active_profile: None,

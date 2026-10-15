@@ -15,10 +15,10 @@ use windows_sys::Win32::Devices::Bluetooth::{
 };
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, GetLastError};
 use windows_sys::Win32::Networking::WinSock::{
-    INVALID_SOCKET, SO_RCVTIMEO, SOCK_STREAM, SOCKADDR, SOCKET, SOCKET_ERROR, SOL_SOCKET, WSADATA,
+    INVALID_SOCKET, POLLRDNORM, SOCK_STREAM, SOCKADDR, SOCKET, SOCKET_ERROR, WSADATA,
     WSAECONNABORTED, WSAECONNRESET, WSAENETDOWN, WSAENETRESET, WSAENOTCONN, WSAESHUTDOWN,
-    WSAETIMEDOUT, WSAEWOULDBLOCK, WSAGetLastError, WSAStartup, closesocket, connect as ws_connect,
-    recv, send, setsockopt, socket,
+    WSAETIMEDOUT, WSAGetLastError, WSAPOLLFD, WSAPoll, WSAStartup, closesocket,
+    connect as ws_connect, recv, send, socket,
 };
 use windows_sys::core::GUID;
 
@@ -135,7 +135,6 @@ fn start_winsock() -> Result<(), RfcommError> {
 #[derive(Debug)]
 pub struct RfcommLink {
     socket: SOCKET,
-    rcv_timeout_ms: Option<u32>,
 }
 
 /// Connect to `uuid` on a paired device. Windows resolves the RFCOMM channel through SDP
@@ -149,10 +148,7 @@ pub fn connect(device: &PairedDevice, uuid: &ServiceUuid) -> Result<RfcommLink, 
         return Err(os("socket", unsafe { WSAGetLastError() }));
     }
     // From here the link owns the socket, so an early return closes it.
-    let link = RfcommLink {
-        socket: s,
-        rcv_timeout_ms: None,
-    };
+    let link = RfcommLink { socket: s };
     let addr = SOCKADDR_BTH {
         addressFamily: AF_BTH,
         btAddr: device.address().raw(),
@@ -197,33 +193,45 @@ impl ByteLink for RfcommLink {
                     os("send", code)
                 });
             }
+            if n == 0 {
+                // A blocking send of a non-empty buffer never returns 0: do not spin.
+                return Err(os("send", 0));
+            }
             rest = &rest[(n as usize).min(rest.len())..];
         }
         Ok(())
     }
 
+    /// Waits with `WSAPoll` until the socket is readable, then reads once. `Ok(0)` is the
+    /// poll timeout. A reset, a hang-up, an error flag, a ready read of 0 bytes (orderly
+    /// close) and a `WSAETIMEDOUT` from `recv` (the link timed out) are all `Disconnected`.
     fn read(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize, RfcommError> {
         if buf.is_empty() {
             return Ok(0);
         }
-        // SO_RCVTIMEO of 0 means wait forever, so never pass 0.
-        let ms = timeout_ms.max(1);
-        if self.rcv_timeout_ms != Some(ms) {
-            // SAFETY: the option value is a DWORD that lives across the call, length 4.
-            let rc = unsafe {
-                setsockopt(
-                    self.socket,
-                    SOL_SOCKET,
-                    SO_RCVTIMEO,
-                    (&raw const ms).cast::<u8>(),
-                    size_of::<u32>() as i32,
-                )
-            };
-            if rc == SOCKET_ERROR {
-                // SAFETY: plain thread-local error read.
-                return Err(os("setsockopt", unsafe { WSAGetLastError() }));
-            }
-            self.rcv_timeout_ms = Some(ms);
+        let mut fd = WSAPOLLFD {
+            fd: self.socket,
+            events: POLLRDNORM,
+            revents: 0,
+        };
+        let wait = i32::try_from(timeout_ms).unwrap_or(i32::MAX);
+        // SAFETY: `fd` is one valid WSAPOLLFD that lives across the call; count 1.
+        let ready = unsafe { WSAPoll(&mut fd, 1, wait) };
+        if ready == SOCKET_ERROR {
+            // SAFETY: plain thread-local error read.
+            let code = unsafe { WSAGetLastError() };
+            return Err(if is_disconnect(code) {
+                RfcommError::Disconnected
+            } else {
+                os("WSAPoll", code)
+            });
+        }
+        if ready == 0 {
+            return Ok(0);
+        }
+        if fd.revents & POLLRDNORM == 0 {
+            // Only hang-up, error or invalid-socket flags are set.
+            return Err(RfcommError::Disconnected);
         }
         let len = buf.len().min(i32::MAX as usize) as i32;
         // SAFETY: `buf` is a live, writable slice of at least `len` bytes; socket is open.
@@ -233,9 +241,7 @@ impl ByteLink for RfcommLink {
             SOCKET_ERROR => {
                 // SAFETY: plain thread-local error read.
                 let code = unsafe { WSAGetLastError() };
-                if code == WSAETIMEDOUT || code == WSAEWOULDBLOCK {
-                    Ok(0)
-                } else if is_disconnect(code) {
+                if code == WSAETIMEDOUT || is_disconnect(code) {
                     Err(RfcommError::Disconnected)
                 } else {
                     Err(os("recv", code))

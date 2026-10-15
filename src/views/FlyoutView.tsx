@@ -17,7 +17,10 @@ import { setPendingTab, type DeviceTab } from "../lib/deepLink";
 import { hideFlyout, openMainWindow } from "../lib/ipc";
 import type { DeviceDetail, DeviceSummary } from "../lib/types";
 import { EmptyState, IconButton, LogoSymbol, ReadOnlyBadge, Skeleton } from "../ui";
-import { DpiIcon, ReportRateIcon, WirelessReceiverIcon } from "../ui/icons";
+import { DpiIcon, ReportRateIcon } from "../ui/icons";
+import { TransportIcon } from "../components/device/TransportIcon";
+import { cellChargingKey, lowestBud } from "../lib/headset";
+import type { HeadsetCell } from "../lib/types";
 import { useDeviceDetail, useDevices } from "../state/devices";
 import { useSettings } from "../state/settings";
 
@@ -74,7 +77,11 @@ export function FlyoutView() {
                 {t("flyout.noData")}
               </div>
             ) : (
-              <FlyoutBody detail={detail} summary={selected} onOpenTab={openWindow} onDetail={applyDetail} />
+              detail.headset ? (
+                <HeadsetFlyoutBody detail={detail} summary={selected} />
+              ) : (
+                <FlyoutBody detail={detail} summary={selected} onOpenTab={openWindow} onDetail={applyDetail} />
+              )
             )}
           </>
         )}
@@ -141,7 +148,7 @@ function DeviceSwitcher({
 }) {
   const t = useT();
   return (
-    <div role="group" aria-label={t("flyout.switcher")} className="flex gap-2 overflow-x-auto px-4 py-1">
+    <div role="group" aria-label={t("flyout.switcher")} className="flex shrink-0 gap-2 overflow-x-auto px-4 py-1">
       {devices.map((device) => {
         const selected = device.id === selectedId;
         const connected = device.connection === "connected";
@@ -157,7 +164,7 @@ function DeviceSwitcher({
               "pressable inline-flex h-7 shrink-0 items-center gap-2 rounded-pill border px-3 text-sm",
               selected
                 ? "border-border bg-surface-2 text-text"
-                : "border-transparent text-text-muted hover-fine:bg-surface-2 hover-fine:text-text",
+                : "cursor-pointer border-border/60 text-text-muted hover-fine:bg-surface-2 hover-fine:text-text",
             )}
           >
             <span className={cx(selected && "text-accent")}>
@@ -213,7 +220,7 @@ function FlyoutBody({
             {connected ? <ModeChip mode={onboard?.mode} activeProfile={onboard?.activeProfile} /> : null}
           </div>
           <p className="flex items-center justify-center gap-1.5 text-sm text-text-muted">
-            {detail.transport === "LIGHTSPEED" ? <WirelessReceiverIcon size={16} className="shrink-0" /> : null}
+            <TransportIcon transport={detail.transport} />
             <span className="truncate">
               {t("device.subline", { vendor: detail.vendor, transport: detail.transport, protocol: detail.protocol })}
             </span>
@@ -285,6 +292,86 @@ function FlyoutBody({
         </div>
       </div>
     </>
+  );
+}
+
+/** Headset card: lowest bud percent, left, right and case, and the current sound mode. Read-only, same style as the mouse card. */
+function HeadsetFlyoutBody({ detail, summary }: { detail: DeviceDetail; summary: DeviceSummary }) {
+  const t = useT();
+  const headset = detail.headset;
+  const connected = detail.connection === "connected";
+  const percent = (headset ? lowestBud(headset) : null) ?? batteryOf(detail, summary);
+  const ncAsm = headset?.ncAsm ?? null;
+  const soundValue = ncAsm
+    ? ncAsm.mode === "noiseCancelling"
+      ? t("headset.sound.nc")
+      : `${t("headset.sound.ambient")}, ${ncAsm.level}/${ncAsm.levelMax}`
+    : "--";
+
+  return (
+    <>
+      <div className="px-4">
+        <div className="relative flex justify-center">
+          <DeviceIllustration illustration={detail.illustration} kind={detail.kind} size={150} dimmed={!connected} asleep={!connected} />
+        </div>
+        <div className="text-center">
+          <h1 className="min-w-0 truncate text-lg font-semibold text-text">{detail.name}</h1>
+          <p className="flex items-center justify-center gap-1.5 text-sm text-text-muted">
+            <TransportIcon transport={detail.transport} />
+            <span className="truncate">
+              {t("device.subline", { vendor: detail.vendor, transport: detail.transport, protocol: detail.protocol })}
+            </span>
+          </p>
+        </div>
+      </div>
+
+      <div className="px-4 pt-2">
+        <div className="flex items-end justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs text-text-muted">{t("device.battery.label")}</div>
+            {percent !== null ? (
+              <div className="flex items-baseline gap-1">
+                <span className="font-mono text-[48px] leading-[52px] font-light tabular-nums text-text">{percent}</span>
+                <span className="text-lg font-medium text-accent">%</span>
+              </div>
+            ) : (
+              <div className="font-mono text-[48px] leading-[52px] font-light text-text-faint">--</div>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-1 pb-1">
+            {!connected ? <span className="text-xs text-text-muted">{t("device.lastRead")}</span> : null}
+          </div>
+        </div>
+        {percent !== null ? <BatteryBar percent={percent} className="mt-2" /> : <div className="mt-2 h-1.5" />}
+      </div>
+
+      <div className="px-4 pt-3 pb-3">
+        <div className={cx("grid grid-cols-3 gap-2", !connected && "opacity-60")}>
+          <MiniCell label={t("headset.battery.left")} cell={headset?.battery?.left ?? null} />
+          <MiniCell label={t("headset.battery.right")} cell={headset?.battery?.right ?? null} />
+          <MiniCell label={t("headset.battery.case")} cell={headset?.battery?.case ?? null} />
+        </div>
+        <div
+          title={t("tile.readOnly")}
+          className={cx("mt-2 rounded-control border border-border bg-surface-2 px-3 py-2.5", !connected && "opacity-60")}
+        >
+          <span className="text-xs text-text-muted">{t("headset.sound.title")}</span>
+          <div className="truncate text-base font-medium text-text">{soundValue}</div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function MiniCell({ label, cell }: { label: string; cell: HeadsetCell | null }) {
+  const t = useT();
+  const key = cell ? cellChargingKey(cell.charging) : null;
+  return (
+    <div className="min-w-0 rounded-control border border-border bg-surface-2 px-3 py-2.5">
+      <div className="truncate text-xs text-text-muted">{label}</div>
+      <div className="truncate font-mono text-base font-medium tabular-nums text-text">{cell ? `${cell.percent}%` : "--"}</div>
+      <div className="h-4 truncate text-xs font-medium text-accent">{key ? t(key) : null}</div>
+    </div>
   );
 }
 

@@ -201,3 +201,104 @@ pub fn read_snapshot<L: ByteLink>(session: &mut Session<L>) -> Result<Snapshot, 
         codec,
     })
 }
+
+/// Which part of the snapshot to read again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    Battery,
+    NcAsm,
+    Eq,
+}
+
+/// What [`Snapshot::apply`] did with a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// A value of the snapshot was replaced (compare before and after for a change).
+    Updated,
+    /// The message only says that something changed: read the item with a GET.
+    Reread(Item),
+    /// Not about the snapshot.
+    Ignored,
+}
+
+impl Snapshot {
+    /// Folds one incoming message (battery, NC/ASM, EQ, multipoint, sidetone) into the
+    /// snapshot. A bare EQ change and an unparsable battery, NC/ASM or EQ message ask for a
+    /// re-read of that item.
+    pub fn apply(&mut self, incoming: &Incoming) -> Applied {
+        match &incoming.message {
+            Message::BatteryLr(b) => self.battery = Some(*b),
+            Message::Cradle(c) => self.cradle = Some(*c),
+            Message::NcAsmParam(p) => match self.ncasm.as_mut() {
+                Some(nc) => nc.param = *p,
+                None => return Applied::Reread(Item::NcAsm),
+            },
+            Message::EqParam(p) => match self.eq.as_mut() {
+                Some(eq) => eq.param = p.clone(),
+                None => return Applied::Reread(Item::Eq),
+            },
+            Message::EqChanged => return Applied::Reread(Item::Eq),
+            Message::GeneralSetting(g) => match g.kind {
+                GeneralSettingKind::Multipoint => self.multipoint = Some(g.enabled),
+                GeneralSettingKind::Sidetone => self.sidetone = Some(g.enabled),
+            },
+            Message::Unknown(u) => {
+                return match u.command {
+                    messages::command::POWER_NTFY_STATUS => Applied::Reread(Item::Battery),
+                    messages::command::NCASM_NTFY_PARAM => Applied::Reread(Item::NcAsm),
+                    messages::command::EQEBB_NTFY_PARAM => Applied::Reread(Item::Eq),
+                    _ => Applied::Ignored,
+                };
+            }
+            _ => return Applied::Ignored,
+        }
+        Applied::Updated
+    }
+}
+
+/// Reads one item again with a read-tier GET and stores it. A missing reply keeps the old
+/// value; a dropped link is an error.
+pub fn reread<L: ByteLink>(
+    session: &mut Session<L>,
+    snapshot: &mut Snapshot,
+    item: Item,
+) -> Result<(), SessionError> {
+    match item {
+        Item::Battery => {
+            if has(
+                session.functions(),
+                function_id::LR_BATTERY_LEVEL_WITH_THRESHOLD,
+            ) && let Some(Message::BatteryLr(b)) =
+                ask(session, &messages::battery_lr())?.map(|i| i.message)
+            {
+                snapshot.battery = Some(b);
+            }
+            if has(
+                session.functions(),
+                function_id::CRADLE_BATTERY_LEVEL_WITH_THRESHOLD,
+            ) && let Some(Message::Cradle(c)) =
+                ask(session, &messages::battery_cradle())?.map(|i| i.message)
+            {
+                snapshot.cradle = Some(c);
+            }
+        }
+        Item::NcAsm => {
+            if let Some(nc) = snapshot.ncasm.as_mut()
+                && let Some(Message::NcAsmParam(p)) =
+                    ask(session, &messages::ncasm_get_param(NCASM_TYPE_DUAL_AMBIENT))?
+                        .map(|i| i.message)
+            {
+                nc.param = p;
+            }
+        }
+        Item::Eq => {
+            if let Some(eq) = snapshot.eq.as_mut()
+                && let Some(Message::EqParam(p)) =
+                    ask(session, &messages::eq_get_param())?.map(|i| i.message)
+            {
+                eq.param = p;
+            }
+        }
+    }
+    Ok(())
+}

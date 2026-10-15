@@ -123,6 +123,55 @@ export interface SaveProfileResult {
   reloaded: boolean;
 }
 
+export type CellCharging = "notCharging" | "charging" | "charged" | "unknown";
+
+export interface HeadsetCell {
+  percent: number;
+  charging: CellCharging;
+}
+
+export interface HeadsetBattery {
+  left: HeadsetCell | null;
+  right: HeadsetCell | null;
+  case: HeadsetCell | null;
+}
+
+export interface NcAsmView {
+  mode: "noiseCancelling" | "ambient";
+  ambientMode: "normal" | "voice";
+  level: number;
+  /** Range of the current ambient mode. */
+  levelMin: number;
+  levelMax: number;
+}
+
+export interface EqPresetView {
+  id: number;
+  /** Stable lowercase key (off, bright, ..., custom, user1, user2); null for an unlisted id. */
+  name: string | null;
+}
+
+export interface EqView {
+  preset: number;
+  presetName: string | null;
+  presets: EqPresetView[];
+  /** Raw band steps, 0..stepCount-1; dB = step - (stepCount - 1) / 2. */
+  bands: number[];
+  stepCount: number;
+}
+
+/** Headset data (Sony WF-C710N), read only for now. */
+export interface HeadsetView {
+  battery: HeadsetBattery | null;
+  ncAsm: NcAsmView | null;
+  eq: EqView | null;
+  multipoint: boolean | null;
+  sidetone: boolean | null;
+  /** "SBC" | "AAC" | "LDAC" | "aptX" | "aptX HD" | "LC3", null while unsettled or unknown. */
+  codec: string | null;
+  firmware: string | null;
+}
+
 export interface DeviceDetail extends DeviceSummary {
   vendor: string;
   transport: string;
@@ -136,4 +185,6 @@ export interface DeviceDetail extends DeviceSummary {
   dpi: { min: number; max: number; step: number; current: number } | null;
   reportRate: { optionsHz: number[]; currentHz: number } | null;
   onboard: OnboardInfo | null;
+  /** Set for headsets, null for the mouse. */
+  headset: HeadsetView | null;
 }

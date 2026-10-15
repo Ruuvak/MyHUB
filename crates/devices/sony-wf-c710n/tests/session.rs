@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use mdr::messages::{self, Message};
 use mdr::messages::{AmbientMode, NcAsmMode};
-use mdr::{DataType, decode_frame, encode_ack};
+use mdr::{DataType, Table, decode_frame, encode_ack};
 use myhub_rfcomm::MockLink;
-use sony_wf_c710n::{Session, Snapshot, read_snapshot};
+use sony_wf_c710n::{Session, SessionError, Snapshot, read_snapshot};
 
 const FIXTURES: [&str; 4] = [
     include_str!("../../../mdr/tests/fixtures/handshake.txt"),
@@ -163,4 +164,133 @@ fn frames_pushed_before_the_first_send_are_acked() {
         "one ACK per pushed frame, seq flipped"
     );
     assert_eq!(session.take_notifications().len(), 2);
+}
+
+#[test]
+fn reconnect_restarts_the_tables_and_refuses_requests_until_they_are_read_again() {
+    let mut session = Session::new(replay_link());
+    session.set_reply_timeout(Duration::from_millis(60));
+    read_snapshot(&mut session).expect("first snapshot");
+    assert!(session.functions().count(Table::One) > 0);
+
+    session.reconnect(replay_link());
+    assert_eq!(session.functions().count(Table::One), 0, "table restarts");
+    let refused = session.request(&messages::battery_lr());
+    assert!(
+        matches!(refused, Err(SessionError::Policy(_))),
+        "{refused:?}"
+    );
+    assert!(
+        session
+            .transport()
+            .writes()
+            .iter()
+            .all(|w| decode_frame(w).is_ok_and(|f| f.data_type == DataType::Ack)),
+        "the refused request sent no request frame"
+    );
+    // A fresh handshake on the new link works again.
+    read_snapshot(&mut session).expect("snapshot after the reconnect");
+}
+
+#[test]
+fn a_notification_between_request_and_reply_is_queued_not_taken_as_the_reply() {
+    let table = replies();
+    let mut link = MockLink::new();
+    link.set_responder(move |written| {
+        let frame = decode_frame(written).expect("valid frame");
+        if frame.data_type == DataType::Ack {
+            return Vec::new();
+        }
+        let mut out = vec![encode_ack((frame.seq & 1) ^ 1)];
+        // Battery notification first (headset seq 0), then the logged reply (seq 1).
+        out.push(build(
+            0x0C,
+            0,
+            &[0x25, 0x09, 0x64, 0x00, 0x64, 0x00, 0x14, 0x14],
+        ));
+        let key = (frame.data_type.to_u8(), frame.payload);
+        for (dt, payload) in table.get(&key).into_iter().flatten() {
+            out.push(build(*dt, 1, payload));
+        }
+        out
+    });
+    let mut session = Session::new(link);
+    let reply = session
+        .request(&messages::protocol_info(Table::One))
+        .expect("reply");
+    assert!(
+        matches!(reply.message, Message::ProtocolInfo(_)),
+        "{reply:?}"
+    );
+    let queued = session.take_notifications();
+    assert_eq!(queued.len(), 1);
+    assert!(matches!(queued[0].message, Message::BatteryLr(_)));
+}
+
+#[test]
+fn to_detail_maps_the_fixture_snapshot() {
+    let (mut s, _) = snapshot_run();
+    // Lower the right bud: the summary shows the lower of the two.
+    let mut b = s.battery.expect("battery");
+    b.right.level = 42;
+    s.battery = Some(b);
+    let d = sony_wf_c710n::to_detail(&s, true);
+    assert_eq!(d.summary.id, "sony-wf-c710n");
+    assert_eq!(d.summary.battery_percent, Some(42));
+    assert!(d.read_only);
+    let json = serde_json::to_value(&d).unwrap();
+    assert_eq!(json["kind"], "headset");
+    assert_eq!(json["protocol"], "Sony MDR");
+    let h = &json["headset"];
+    assert_eq!(h["battery"]["left"]["percent"], 100);
+    assert_eq!(h["battery"]["left"]["charging"], "notCharging");
+    assert_eq!(h["battery"]["case"]["percent"], 0x32);
+    assert_eq!(h["ncAsm"]["mode"], "noiseCancelling");
+    assert_eq!(h["ncAsm"]["ambientMode"], "normal");
+    assert_eq!(h["ncAsm"]["level"], 20);
+    assert_eq!(h["eq"]["preset"], 0xA0);
+    assert_eq!(h["eq"]["presetName"], "custom");
+    let names: Vec<_> = h["eq"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"off") && names.contains(&"user1"),
+        "{names:?}"
+    );
+    assert_eq!(h["multipoint"], true);
+    assert_eq!(h["firmware"], "1.0.5");
+    assert_eq!(
+        sony_wf_c710n::to_detail(&s, false).summary.connection,
+        myhub_core::Connection::Disconnected
+    );
+}
+
+#[test]
+fn notifications_update_the_snapshot_or_ask_for_a_reread() {
+    use sony_wf_c710n::{Applied, Item};
+    let (mut s, _) = snapshot_run();
+    // NC/ASM NTFY: ambient mode, voice, level 7 (69 17 changed total mode amb level).
+    let ntfy = mdr::parse(Table::One, &[0x69, 0x17, 0x01, 0x01, 0x01, 0x01, 0x07]);
+    assert_eq!(s.apply(&ntfy), Applied::Updated);
+    let nc = s.ncasm.as_ref().unwrap();
+    assert_eq!(nc.param.mode, NcAsmMode::Ambient);
+    assert_eq!(nc.param.ambient_mode, AmbientMode::Voice);
+    assert_eq!(nc.param.level, 7);
+    // A battery NTFY replaces the values.
+    let battery = mdr::parse(
+        Table::One,
+        &[0x25, 0x09, 0x50, 0x00, 0x4B, 0x01, 0x14, 0x14],
+    );
+    assert_eq!(s.apply(&battery), Applied::Updated);
+    assert_eq!(s.battery.unwrap().right.level, 0x4B);
+    // A bare `59 00` and an unparsable battery NTFY ask for a GET; other commands are ignored.
+    let bare = mdr::parse(Table::One, &[0x59, 0x00]);
+    assert_eq!(s.apply(&bare), Applied::Reread(Item::Eq));
+    let odd = mdr::parse(Table::One, &[0x25, 0x7F]);
+    assert_eq!(s.apply(&odd), Applied::Reread(Item::Battery));
+    let other = mdr::parse(Table::One, &[0xA5, 0x01]);
+    assert_eq!(s.apply(&other), Applied::Ignored);
 }

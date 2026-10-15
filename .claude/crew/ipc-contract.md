@@ -120,3 +120,25 @@ UI: the DPI and rate editors stage edits locally; "Zapisz na mysz" is the only a
 - On the first successful read after app start, and after each link-up: if restoreLastMode && allowDeviceWrites && prefs.mode == "host", the worker enters app control (host switch + spy, same path as enter_temporary_mode) and applies the stored dpi and reportRateHz. Otherwise nothing is sent.
 - Shutdown and quit still return the mouse to onboard, so it works before the app starts.
 - UI: Settings switch "Przywracaj ostatni tryb po starcie" (hint: "Po starcie aplikacja wraca do ostatniego trybu i ustawień DPI."). The restoreOnConnect toggle in the app-control card is removed.
+
+## Sony headset (read only)
+Device id "sony-wf-c710n", name "WF-C710N", kind "headset", vendor "Sony", transport "Bluetooth", protocol "Sony MDR", illustration "wf-c710n", readOnly always true. No new commands and no new events: the headset uses list_devices, get_device_detail, refresh_device, "devices-changed" and "device-detail-changed" like the mouse. list_devices returns the G502 first, then the headset.
+DeviceDetail gains headset: HeadsetView | null (null for the G502; dpi, reportRate and onboard are null for the headset).
+HeadsetView {
+  battery: { left: Cell | null; right: Cell | null; case: Cell | null } | null
+  ncAsm: { mode: "noiseCancelling" | "ambient"; ambientMode: "normal" | "voice"; level: number; levelMin: number; levelMax: number } | null   // range of the current ambient mode
+  eq: { preset: number; presetName: string | null; presets: { id: number; name: string | null }[]; bands: number[]; stepCount: number } | null
+  multipoint: boolean | null
+  sidetone: boolean | null
+  codec: string | null            // "SBC" | "AAC" | "LDAC" | "aptX" | "aptX HD" | "LC3", null while unsettled or unknown
+  firmware: string | null
+}
+Cell { percent: number; charging: "notCharging" | "charging" | "charged" | "unknown" }
+Preset names are stable lowercase keys the UI translates: off, bright, excited, mellow, relaxed, vocal, treble, bass, speech, custom, user1, user2; null for an id not in that list.
+Summary and battery: batteryPercent and battery.percent are the lower of left and right; battery.charging is "charging" when either bud charges, "full" when both are charged, "discharging" when neither charges, else "unknown"; level null, externalPower false. The case is only in headset.battery.case.
+Disconnected semantics: the headset worker keeps the last values and sets connection "disconnected" when the link drops (case closed, switched off, out of range); it retries after 2 s, 5 s, then every 10 s. Before the first successful connect (not paired, never reachable) the device is absent from list_devices and get_device_detail/refresh_device answer null.
+refresh_device("sony-wf-c710n") re-reads battery, NC/ASM and EQ with GETs and answers the new detail; null while disconnected or absent. Live changes (battery, NC/ASM, EQ, multipoint, sidetone) arrive as "device-detail-changed".
+Backoff: after 3 failed connects in a row the retry interval grows to 60 s (buds in the case); a refresh_device call for the headset, or a successful connect, returns to the short schedule. A refresh the headset worker cannot answer within 5 s (it is busy connecting or in slow reads) is answered with the cached detail instead of null, so the UI keeps the last values; the worker still finishes and emits "device-detail-changed". A worker panic republishes the headset as disconnected.
+Mouse commands with the headset id (set_dpi, set_report_rate, enter_temporary_mode, leave_temporary_mode, save_profile_to_mouse) answer the error "writesDisabled" without reaching any worker. get_device_prefs answers null (no prefs yet; the id is in the known list for the prefs file only).
+The tray shows the G502 while it is known, otherwise the headset ("WF-C710N: 80%"). A disconnected headset reads "WF-C710N: asleep" (en) or "WF-C710N: uśpiona" (pl), the same wording as the mouse.
+KNOWN_DEVICE_IDS includes the headset id, so get_device_prefs would parse a Sony prefs file as the mouse DevicePrefs. Harmless now (no such file is written); revisit before headset prefs exist.

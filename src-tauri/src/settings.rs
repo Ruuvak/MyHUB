@@ -171,7 +171,7 @@ fn write_atomic(path: &Path, json: &str) -> io::Result<()> {
 pub const DEVICES_DIR: &str = "devices";
 
 /// Device ids the manager knows. Only these get a prefs file.
-pub const KNOWN_DEVICE_IDS: &[&str] = &[logitech_g502x::DEVICE_ID];
+pub const KNOWN_DEVICE_IDS: &[&str] = &[logitech_g502x::DEVICE_ID, sony_wf_c710n::DEVICE_ID];
 
 /// Path of the prefs file of one device: `<config_dir>/devices/<id>.json`.
 /// `None` for an id the manager does not know, or that is not a plain

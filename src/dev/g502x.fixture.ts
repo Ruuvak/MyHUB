@@ -177,6 +177,7 @@ function buildDetail(connected: boolean): DeviceDetail {
     dpi: { min: 100, max: 25600, step: 50, current: 1600 },
     reportRate: { optionsHz: [1000, 500, 250, 125], currentHz: 500 },
     onboard: { mode: "onboard", activeProfile: 3, buttonCount: BUTTON_COUNT, profiles: buildProfiles(), writableProfile: 3 },
+    headset: null,
   };
 }
 
