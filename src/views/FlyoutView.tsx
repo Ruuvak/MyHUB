@@ -14,7 +14,7 @@ import { cx } from "../lib/cx";
 import { activeUserProfile, batteryOf, isOnPower, levelKey } from "../lib/device";
 import { ChargingLabel } from "../components/device/ChargingLabel";
 import { setPendingTab, type DeviceTab } from "../lib/deepLink";
-import { hideFlyout, openMainWindow } from "../lib/ipc";
+import { hideFlyout, openMainWindow, setNcAsm } from "../lib/ipc";
 import type { DeviceDetail, DeviceSummary } from "../lib/types";
 import { EmptyState, IconButton, LogoSymbol, ReadOnlyBadge, Skeleton } from "../ui";
 import { DpiIcon, ReportRateIcon } from "../ui/icons";
@@ -22,6 +22,8 @@ import { TransportIcon } from "../components/device/TransportIcon";
 import { cellChargingKey, lowestBud } from "../lib/headset";
 import type { HeadsetCell } from "../lib/types";
 import { useDeviceDetail, useDevices } from "../state/devices";
+import { SoundModeSwitch } from "./device/HeadsetPanel";
+import { useHeadsetWrite } from "./device/useHeadsetWrite";
 import { useSettings } from "../state/settings";
 
 /** Compact tray flyout card, rendered when the window label is "flyout". The tiles are read-only; they open the main window. */
@@ -78,7 +80,7 @@ export function FlyoutView() {
               </div>
             ) : (
               detail.headset ? (
-                <HeadsetFlyoutBody detail={detail} summary={selected} />
+                <HeadsetFlyoutBody detail={detail} summary={selected} onDetail={applyDetail} />
               ) : (
                 <FlyoutBody detail={detail} summary={selected} onOpenTab={openWindow} onDetail={applyDetail} />
               )
@@ -295,18 +297,23 @@ function FlyoutBody({
   );
 }
 
-/** Headset card: lowest bud percent, left, right and case, and the current sound mode. Read-only, same style as the mouse card. */
-function HeadsetFlyoutBody({ detail, summary }: { detail: DeviceDetail; summary: DeviceSummary }) {
+/** Headset card: lowest bud percent, left, right and case, and the sound mode as the one editable control (when changes are allowed). */
+function HeadsetFlyoutBody({
+  detail,
+  summary,
+  onDetail,
+}: {
+  detail: DeviceDetail;
+  summary: DeviceSummary;
+  onDetail: (next: DeviceDetail) => void;
+}) {
   const t = useT();
   const headset = detail.headset;
   const connected = detail.connection === "connected";
   const percent = (headset ? lowestBud(headset) : null) ?? batteryOf(detail, summary);
   const ncAsm = headset?.ncAsm ?? null;
-  const soundValue = ncAsm
-    ? ncAsm.mode === "noiseCancelling"
-      ? t("headset.sound.nc")
-      : `${t("headset.sound.ambient")}, ${ncAsm.level}/${ncAsm.levelMax}`
-    : "--";
+  const write = useHeadsetWrite(detail.id, onDetail);
+  const disabled = detail.readOnly || write.pending;
 
   return (
     <>
@@ -352,11 +359,26 @@ function HeadsetFlyoutBody({ detail, summary }: { detail: DeviceDetail; summary:
           <MiniCell label={t("headset.battery.case")} cell={headset?.battery?.case ?? null} />
         </div>
         <div
-          title={t("tile.readOnly")}
+          title={detail.readOnly && connected ? t("headset.note.writesOff", { setting: t("settings.allowWrites") }) : undefined}
           className={cx("mt-2 rounded-control border border-border bg-surface-2 px-3 py-2.5", !connected && "opacity-60")}
         >
           <span className="text-xs text-text-muted">{t("headset.sound.title")}</span>
-          <div className="truncate text-base font-medium text-text">{soundValue}</div>
+          {ncAsm ? (
+            <div className="mt-1 flex">
+              <SoundModeSwitch
+                ncAsm={ncAsm}
+                disabled={disabled}
+                onSet={(args) => write.run("sound", () => setNcAsm({ id: detail.id, ...args }))}
+              />
+            </div>
+          ) : (
+            <div className="text-base font-medium text-text">--</div>
+          )}
+          {write.error ? (
+            <p role="alert" className="mt-1.5 text-xs text-danger">
+              {write.error.text}
+            </p>
+          ) : null}
         </div>
       </div>
     </>

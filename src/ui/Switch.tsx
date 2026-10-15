@@ -22,8 +22,8 @@ export function Switch({ checked, onChange, labelledBy, describedBy, disabled }:
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cx(
-        "t-colors relative inline-flex h-5 w-9 shrink-0 items-center rounded-pill border disabled:opacity-50",
-        checked ? "border-accent bg-accent" : "border-border bg-surface-2",
+        "t-colors relative inline-flex h-5 w-9 shrink-0 items-center rounded-pill border disabled:cursor-default disabled:opacity-50",
+        checked ? (disabled ? "border-text-faint bg-text-faint" : "border-accent bg-accent") : "border-border bg-surface-2",
       )}
     >
       <span

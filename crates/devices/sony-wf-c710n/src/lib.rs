@@ -1,11 +1,13 @@
-//! Sony WF-C710N driver (read tier only in this slice).
+//! Sony WF-C710N driver.
 //!
 //! [`Session`] runs the `mdr` link over any [`myhub_rfcomm::ByteLink`]: it ACKs
-//! everything the headset sends, sends only requests that pass `mdr::Policy::new()`
-//! (the read tier; the setting and disconnecting gates are never opened here) and
-//! absorbs support function and capability replies. [`read_snapshot`] runs the
-//! handshake and reads the state. The headset's address is never stored in this
-//! repository: [`candidates`] finds the device at runtime among the paired devices.
+//! everything the headset sends, absorbs support function and capability replies and
+//! sends reads through `mdr::Policy::new()` (the read tier). The write calls of
+//! [`Session`] (`set_nc_asm`, `select_eq_preset`, `set_eq_bands`, `set_sidetone`,
+//! `set_multipoint`) each build a policy with only the gate that call needs; the session
+//! never keeps an opened gate. [`read_snapshot`] runs the handshake and reads the state.
+//! The headset address is never stored in this repository: [`candidates`] finds the
+//! device at runtime among the paired devices.
 //!
 //! The CONNECT capability info reply carries the headset address, so it is never
 //! requested.
@@ -14,15 +16,18 @@ mod describe;
 mod detail;
 mod session;
 mod snapshot;
+mod writes;
 
 use myhub_rfcomm::{PairedDevice, RfcommError, RfcommLink, ServiceUuid, connect};
 
 pub use describe::describe;
 pub use detail::to_detail;
-pub use session::{READ_POLL_MS, REPLY_TIMEOUT, Session, SessionError};
+pub use mdr::messages::{AmbientMode, NcAsmMode};
+pub use session::{READ_POLL_MS, REPLY_TIMEOUT, Session, SessionError, VERIFY_WAIT};
 pub use snapshot::{
     Applied, EqSnapshot, Identity, Item, NcAsmSnapshot, Snapshot, handshake, read_snapshot, reread,
 };
+pub use writes::{ALERT_WAIT, Change, DROP_WAIT, EqBandsChange, MultipointOutcome, WriteError};
 
 /// Stable device ID used by the UI and the app's per-device files.
 pub const DEVICE_ID: &str = "sony-wf-c710n";

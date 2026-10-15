@@ -46,7 +46,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backup;
 use crate::settings::{self, Language, Settings, SettingsState};
-use crate::sony::{SonyCommand, SonyWorker};
+use crate::sony::{SONY_WRITE_WAIT, SonyCommand, SonyWorker, SonyWrite};
 use crate::tray;
 
 pub const DEVICES_CHANGED_EVENT: &str = "devices-changed";
@@ -81,7 +81,7 @@ const SAVE_MIN_REMAINING: Duration = Duration::from_secs(15);
 /// How long shutdown waits for a flash write in flight.
 const FLASH_SHUTDOWN_WAIT: Duration = Duration::from_secs(60);
 /// How long before the caller's timeout the worker stops starting writes.
-const WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(2);
+pub(crate) const WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(2);
 /// Reply timeout of the return to onboard mode while the app shuts down.
 const SHUTDOWN_REPLY_TIMEOUT: Duration = Duration::from_millis(700);
 /// App control is restored at most once per this time: a mouse that keeps
@@ -441,10 +441,33 @@ impl DeviceManager {
             .map(|()| answer)
     }
 
+    /// Asks the headset worker to change a setting. Another device id is refused with
+    /// `notSupported`. The answer arrives on the returned channel; `None` when the
+    /// worker is gone.
+    pub fn request_sony_write(
+        &self,
+        id: &str,
+        op: SonyWrite,
+    ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        if route_of(id) != Route::Sony {
+            return Some(refused_reply("notSupported"));
+        }
+        let (reply, answer) = mpsc::channel();
+        self.sony_commands
+            .send(SonyCommand::Write {
+                op,
+                deadline: Instant::now() + SONY_WRITE_WAIT.saturating_sub(WRITE_DEADLINE_MARGIN),
+                reply,
+            })
+            .ok()
+            .map(|()| answer)
+    }
+
     /// Tells the worker that the settings changed, so it publishes the detail
     /// again with the new `readOnly`.
     pub fn settings_changed(&self) {
         let _ = self.commands.send(Command::SettingsChanged);
+        let _ = self.sony_commands.send(SonyCommand::SettingsChanged);
     }
 
     /// The values the user last applied to this device; `None` when there are

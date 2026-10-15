@@ -3,9 +3,10 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use mdr::messages::{EqCapability, Message, NcAsmCapability};
 use mdr::{
-    DataType, DeviceLimits, FunctionTable, Incoming, Link, LinkEvent, Policy, PolicyError, Request,
-    SendError, Tick, parse_received,
+    CheckedRequest, DataType, DeviceLimits, FunctionTable, Incoming, Link, LinkEvent, Policy,
+    PolicyError, Request, SendError, Tick, parse_received,
 };
 use myhub_rfcomm::{ByteLink, RfcommError};
 use thiserror::Error;
@@ -14,6 +15,8 @@ use thiserror::Error;
 pub const READ_POLL_MS: u32 = 50;
 /// Default wait for the reply to a request.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Default wait for the NTFY that follows a SET, before the value is read back.
+pub const VERIFY_WAIT: Duration = Duration::from_secs(2);
 
 /// Why a session call failed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -63,15 +66,20 @@ fn is_reply(request: &Request, rx: &Rx) -> bool {
         && rx.payload.get(1) == Some(&kind)
 }
 
-/// One connection to the headset. Read tier only: the policy never opens a gate.
+/// One connection to the headset. The session's own policy is the read tier and never
+/// changes: a write builds a policy with only the gate it needs for that one call
+/// (see the `writes` module) and passes it to [`Session::request_with`].
 pub struct Session<L: ByteLink> {
     transport: L,
     link: Link,
     functions: FunctionTable,
     limits: DeviceLimits,
+    ncasm_capability: Option<NcAsmCapability>,
+    eq_capability: Option<EqCapability>,
     policy: Policy,
     clock: Instant,
     reply_timeout: Duration,
+    verify_wait: Duration,
     notifications: VecDeque<Incoming>,
     primed: bool,
     buf: Vec<u8>,
@@ -84,9 +92,12 @@ impl<L: ByteLink> Session<L> {
             link: Link::new(),
             functions: FunctionTable::new(),
             limits: DeviceLimits::new(),
+            ncasm_capability: None,
+            eq_capability: None,
             policy: Policy::new(),
             clock: Instant::now(),
             reply_timeout: REPLY_TIMEOUT,
+            verify_wait: VERIFY_WAIT,
             notifications: VecDeque::new(),
             primed: false,
             buf: vec![0; 1024],
@@ -94,18 +105,42 @@ impl<L: ByteLink> Session<L> {
     }
 
     /// Continue on a new transport after a drop: `Link::reset`, and the function table,
-    /// limits and queued notifications start over.
+    /// limits, capabilities and queued notifications start over.
     pub fn reconnect(&mut self, transport: L) {
         self.transport = transport;
         self.link.reset();
         self.functions = FunctionTable::new();
         self.limits = DeviceLimits::new();
+        self.ncasm_capability = None;
+        self.eq_capability = None;
         self.notifications.clear();
         self.primed = false;
     }
 
     pub fn set_reply_timeout(&mut self, timeout: Duration) {
         self.reply_timeout = timeout;
+    }
+
+    /// How long a write waits for the matching notification before it reads the value
+    /// back (default [`VERIFY_WAIT`]).
+    pub fn set_verify_wait(&mut self, wait: Duration) {
+        self.verify_wait = wait;
+    }
+
+    pub(crate) fn verify_wait(&self) -> Duration {
+        self.verify_wait
+    }
+
+    pub(crate) fn ncasm_capability(&self) -> Option<&NcAsmCapability> {
+        self.ncasm_capability.as_ref()
+    }
+
+    pub(crate) fn eq_capability(&self) -> Option<&EqCapability> {
+        self.eq_capability.as_ref()
+    }
+
+    pub(crate) fn notifications_mut(&mut self) -> &mut VecDeque<Incoming> {
+        &mut self.notifications
     }
 
     pub fn transport(&self) -> &L {
@@ -159,10 +194,16 @@ impl<L: ByteLink> Session<L> {
                     self.limits.absorb(&frame);
                     let data_type = frame.data_type();
                     let payload = frame.payload().to_vec();
+                    let incoming = parse_received(frame);
+                    match &incoming.message {
+                        Message::NcAsmCapability(c) => self.ncasm_capability = Some(c.clone()),
+                        Message::EqCapability(c) => self.eq_capability = Some(c.clone()),
+                        _ => {}
+                    }
                     delivered.push(Rx {
                         data_type,
                         payload,
-                        incoming: parse_received(frame),
+                        incoming,
                     });
                 }
                 LinkEvent::Acked => {}
@@ -197,14 +238,54 @@ impl<L: ByteLink> Session<L> {
     /// Check the request against the read tier, send it and wait for the ACK and the
     /// reply. Other incoming messages are queued as notifications.
     pub fn request(&mut self, request: &Request) -> Result<Incoming, SessionError> {
+        self.request_with(self.policy, request)
+    }
+
+    /// Wait until the previous frame is acknowledged (at most the reply timeout).
+    pub(crate) fn wait_idle(&mut self) -> Result<(), SessionError> {
         self.prime()?;
         let busy_deadline = Instant::now() + self.reply_timeout;
         while self.link.is_busy() && Instant::now() < busy_deadline {
             self.poll(READ_POLL_MS)?;
         }
-        let checked =
-            self.policy
-                .check(self.link.epoch(), &self.functions, &self.limits, request)?;
+        Ok(())
+    }
+
+    /// Send a checked frame that has no reply (a SET or an alert answer) and wait for its
+    /// ACK. Anything the headset sends meanwhile is queued as a notification.
+    pub(crate) fn send_checked(&mut self, checked: CheckedRequest) -> Result<(), SessionError> {
+        self.wait_idle()?;
+        let bytes = self.link.send(checked, self.now_ms())?;
+        self.transport.write_all(&bytes)?;
+        let deadline = Instant::now() + self.reply_timeout;
+        while self.link.is_busy() {
+            if Instant::now() >= deadline {
+                return Err(SessionError::Timeout);
+            }
+            self.poll(READ_POLL_MS)?;
+        }
+        Ok(())
+    }
+
+    /// Check a request that needs no reply against `policy` and send it.
+    pub(crate) fn send_with(
+        &mut self,
+        policy: Policy,
+        request: &Request,
+    ) -> Result<(), SessionError> {
+        let checked = policy.check(self.link.epoch(), &self.functions, &self.limits, request)?;
+        self.send_checked(checked)
+    }
+
+    /// Like [`Session::request`] with an explicit policy. Writes pass a policy that holds
+    /// only the gate they need; the session never keeps an opened gate.
+    pub(crate) fn request_with(
+        &mut self,
+        policy: Policy,
+        request: &Request,
+    ) -> Result<Incoming, SessionError> {
+        self.wait_idle()?;
+        let checked = policy.check(self.link.epoch(), &self.functions, &self.limits, request)?;
         let bytes = self.link.send(checked, self.now_ms())?;
         self.transport.write_all(&bytes)?;
         let deadline = Instant::now() + self.reply_timeout;

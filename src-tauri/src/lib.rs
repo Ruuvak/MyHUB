@@ -14,6 +14,7 @@ use device_manager::{
 };
 use myhub_core::{DeviceDetail, DevicePrefs, DeviceSummary};
 use settings::{Settings, SettingsState};
+use sony::{AmbientArg, NcModeArg, SONY_WRITE_WAIT, SonyWrite, ToggleArg};
 
 const SETTINGS_CHANGED_EVENT: &str = "settings-changed";
 const SELECT_DEVICE_EVENT: &str = "select-device";
@@ -130,6 +131,76 @@ async fn run_write(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Runs a headset write on the headset worker and waits for its answer. Errors are
+/// the contract codes (`writesDisabled`, `disconnected`, `outOfRange`,
+/// `notSupported`, `verifyFailed`, `confirmRequired`, `alertMissing`,
+/// `alertRefused`, `deviceError:<code>`).
+async fn run_sony_write(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    op: Result<SonyWrite, String>,
+) -> Result<DeviceDetail, String> {
+    let op = op?;
+    let answer = devices
+        .request_sony_write(&id, op)
+        .ok_or_else(|| "disconnected".to_owned())?;
+    // The wait blocks, so it must not run on an async worker thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        answer
+            .recv_timeout(SONY_WRITE_WAIT)
+            .map_err(|_| "deviceError:timeout".to_owned())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Sets noise cancelling or ambient sound on the headset. Needs `allowDeviceWrites`.
+#[tauri::command]
+async fn set_nc_asm(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    mode: NcModeArg,
+    ambient_mode: AmbientArg,
+    level: i64,
+) -> Result<DeviceDetail, String> {
+    run_sony_write(devices, id, SonyWrite::nc_asm(mode, ambient_mode, level)).await
+}
+
+/// Selects an EQ preset on the headset. Needs `allowDeviceWrites`.
+#[tauri::command]
+async fn set_eq_preset(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    preset: i64,
+) -> Result<DeviceDetail, String> {
+    run_sony_write(devices, id, SonyWrite::eq_preset(preset)).await
+}
+
+/// Writes the bands of the CUSTOM EQ preset. Needs `allowDeviceWrites`.
+#[tauri::command]
+async fn set_eq_bands(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    bands: Vec<i64>,
+) -> Result<DeviceDetail, String> {
+    run_sony_write(devices, id, SonyWrite::eq_bands(&bands)).await
+}
+
+/// Switches sidetone or multipoint. Multipoint drops the Bluetooth link and needs
+/// `confirmDisconnect`; the answer is then the detail with the headset
+/// disconnected, and the final state arrives as `device-detail-changed`.
+#[tauri::command]
+async fn set_headset_toggle(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    setting: ToggleArg,
+    on: bool,
+    confirm_disconnect: Option<bool>,
+) -> Result<DeviceDetail, String> {
+    let op = SonyWrite::toggle(setting, on, confirm_disconnect.unwrap_or(false));
+    run_sony_write(devices, id, Ok(op)).await
 }
 
 /// Sets the current DPI (volatile, never flash). Needs `allowDeviceWrites`.
@@ -333,6 +404,10 @@ pub fn run() {
             enter_temporary_mode,
             leave_temporary_mode,
             save_profile_to_mouse,
+            set_nc_asm,
+            set_eq_preset,
+            set_eq_bands,
+            set_headset_toggle,
             open_main_window,
             hide_flyout
         ])

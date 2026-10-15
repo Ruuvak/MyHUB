@@ -208,6 +208,10 @@ pub enum Item {
     Battery,
     NcAsm,
     Eq,
+    /// Multipoint (`d6 d1`).
+    Multipoint,
+    /// Sidetone (`d6 d2`).
+    Sidetone,
 }
 
 /// What [`Snapshot::apply`] did with a message.
@@ -289,6 +293,23 @@ pub fn reread<L: ByteLink>(
                         .map(|i| i.message)
             {
                 nc.param = p;
+            }
+        }
+        Item::Multipoint | Item::Sidetone => {
+            let kind = if item == Item::Multipoint {
+                GeneralSettingKind::Multipoint
+            } else {
+                GeneralSettingKind::Sidetone
+            };
+            if has(session.functions(), kind.to_u8())
+                && let Some(Message::GeneralSetting(g)) =
+                    ask(session, &messages::general_setting_get(kind))?.map(|i| i.message)
+                && g.kind == kind
+            {
+                match kind {
+                    GeneralSettingKind::Multipoint => snapshot.multipoint = Some(g.enabled),
+                    GeneralSettingKind::Sidetone => snapshot.sidetone = Some(g.enabled),
+                }
             }
         }
         Item::Eq => {

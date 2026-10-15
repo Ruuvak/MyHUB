@@ -12,10 +12,12 @@ interface SegmentedControlProps<T extends string> {
   onChange: (value: T) => void;
   /** Accessible name of the group. */
   label: string;
+  /** Dims the control and ignores clicks and keys. */
+  disabled?: boolean;
 }
 
 /** Radiogroup with arrow-key navigation; the selection indicator slides with transform only. */
-export function SegmentedControl<T extends string>({ value, options, onChange, label }: SegmentedControlProps<T>) {
+export function SegmentedControl<T extends string>({ value, options, onChange, label, disabled }: SegmentedControlProps<T>) {
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const count = options.length;
   const index = Math.max(
@@ -57,7 +59,8 @@ export function SegmentedControl<T extends string>({ value, options, onChange, l
     <div
       role="radiogroup"
       aria-label={label}
-      className="relative inline-grid auto-cols-fr grid-flow-col rounded-control border border-border bg-surface-2 p-0.5"
+      aria-disabled={disabled || undefined}
+      className={cx("relative inline-grid auto-cols-fr grid-flow-col rounded-control border border-border bg-surface-2 p-0.5", disabled && "opacity-60")}
     >
       <span
         aria-hidden="true"
@@ -79,10 +82,11 @@ export function SegmentedControl<T extends string>({ value, options, onChange, l
             role="radio"
             aria-checked={selected}
             tabIndex={selected ? 0 : -1}
+            disabled={disabled}
             onClick={() => onChange(option.value)}
             onKeyDown={onKeyDown}
             className={cx(
-              "t-colors relative z-10 h-7 rounded-[6px] px-3 text-sm font-medium whitespace-nowrap",
+              "t-colors relative z-10 h-7 rounded-[6px] px-3 text-sm font-medium whitespace-nowrap disabled:cursor-default",
               selected ? "text-accent-fg" : "text-text-muted hover-fine:text-text",
             )}
           >

@@ -145,6 +145,15 @@ export interface NcAsmView {
   levelMax: number;
 }
 
+/** Arguments of set_nc_asm besides the device id. NC is sent with level 0. */
+export interface NcAsmArgs {
+  mode: "noiseCancelling" | "ambient";
+  ambientMode: "normal" | "voice";
+  level: number;
+}
+
+export type HeadsetToggle = "sidetone" | "multipoint";
+
 export interface EqPresetView {
   id: number;
   /** Stable lowercase key (off, bright, ..., custom, user1, user2); null for an unlisted id. */

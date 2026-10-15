@@ -1,6 +1,8 @@
 //! Scripted link for tests.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::{ByteLink, RfcommError};
@@ -14,7 +16,7 @@ pub struct MockLink {
     incoming: VecDeque<Vec<u8>>,
     writes: Vec<Vec<u8>>,
     responder: Option<Responder>,
-    disconnected: bool,
+    disconnected: Arc<AtomicBool>,
 }
 
 impl MockLink {
@@ -34,7 +36,13 @@ impl MockLink {
 
     /// After the queued bytes are read, reads and writes fail with `Disconnected`.
     pub fn disconnect(&mut self) {
-        self.disconnected = true;
+        self.disconnected.store(true, Ordering::SeqCst);
+    }
+
+    /// A flag that makes the link behave as after [`MockLink::disconnect`] once set,
+    /// so a responder can drop the link in answer to a write.
+    pub fn disconnect_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.disconnected)
     }
 
     /// Every write so far, in order.
@@ -45,7 +53,7 @@ impl MockLink {
 
 impl ByteLink for MockLink {
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), RfcommError> {
-        if self.disconnected {
+        if self.disconnected.load(Ordering::SeqCst) {
             return Err(RfcommError::Disconnected);
         }
         self.writes.push(bytes.to_vec());
@@ -64,7 +72,7 @@ impl ByteLink for MockLink {
             }
             return Ok(n);
         }
-        if self.disconnected {
+        if self.disconnected.load(Ordering::SeqCst) {
             return Err(RfcommError::Disconnected);
         }
         std::thread::sleep(Duration::from_millis(u64::from(timeout_ms.min(2))));

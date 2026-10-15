@@ -1,7 +1,18 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AppInfo, DeviceDetail, DevicePrefs, DeviceSummary, SaveProfileArgs, SaveProfileResult, Settings } from "./types";
+import type {
+  AppInfo,
+  DeviceDetail,
+  DevicePrefs,
+  DeviceSummary,
+  HeadsetToggle,
+  HeadsetView,
+  NcAsmArgs,
+  SaveProfileArgs,
+  SaveProfileResult,
+  Settings,
+} from "./types";
 
 /** Typed wrapper over the Tauri commands and events. Outside Tauri it falls back to a dev preview. */
 
@@ -100,6 +111,9 @@ function withPreviewSaved(detail: DeviceDetail): DeviceDetail {
   return { ...detail, dpi, onboard: { ...onboard, profiles, writableProfile: writable } };
 }
 
+// Dev preview only: headset values "written" through the setNcAsm, setEq* and setHeadsetToggle wrappers.
+let previewHeadset: Partial<HeadsetView> = {};
+
 /** Dev preview only: the fixture with applied values and a readOnly flag derived like the backend does. */
 async function previewDetail(id: string): Promise<DeviceDetail | null> {
   if (!previewDemo()) return null;
@@ -108,7 +122,9 @@ async function previewDetail(id: string): Promise<DeviceDetail | null> {
   const connected = detail.connection === "connected";
   return {
     ...detail,
-    readOnly: !(previewSettings.allowDeviceWrites && connected),
+    headset: detail.headset && { ...detail.headset, ...previewHeadset },
+    // Dev only: `&writes=1` makes a headset fixture writable without turning the setting on.
+    readOnly: !((previewSettings.allowDeviceWrites || (detail.headset && new URLSearchParams(window.location.search).get("writes") === "1")) && connected),
     dpi: detail.dpi && { ...detail.dpi, current: previewApplied.dpi ?? detail.dpi.current },
     reportRate: detail.reportRate && { ...detail.reportRate, currentHz: previewApplied.reportRateHz ?? detail.reportRate.currentHz },
     onboard: detail.onboard && previewApplied.host ? { ...detail.onboard, mode: "host" } : detail.onboard,
@@ -233,6 +249,75 @@ export async function saveProfileToMouse(args: SaveProfileArgs): Promise<SavePro
     return { detail: next, outcome: "written", backupPath: "backups/logitech-g502x/20261015T120000Z_sector_0003.json", reloaded: !new URLSearchParams(window.location.search).has("noreload") };
   }
   return invoke<SaveProfileResult>("save_profile_to_mouse", { ...args });
+}
+
+/** Dev preview only: the headset detail for a write, or a thrown contract error string like the backend gives. */
+async function previewHeadsetWrite(id: string): Promise<DeviceDetail & { headset: HeadsetView }> {
+  await wait(450);
+  const detail = await previewDetail(id);
+  if (!detail?.headset) throw "notSupported";
+  if (detail.readOnly) throw detail.connection !== "connected" ? "disconnected" : "writesDisabled";
+  return { ...detail, headset: detail.headset };
+}
+
+/**
+ * Sets the sound mode (noise cancelling or ambient). Rejects with a contract error string: "writesDisabled",
+ * "disconnected", "outOfRange", "notSupported", "verifyFailed", "deviceError:timeout" (state unknown, re-read
+ * with refreshDevice), "deviceError:<code>".
+ */
+export async function setNcAsm(args: NcAsmArgs & { id: string }): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    const detail = await previewHeadsetWrite(args.id);
+    const current = detail.headset.ncAsm;
+    if (!current || args.level < 0 || args.level > current.levelMax) throw "outOfRange";
+    previewHeadset = { ...previewHeadset, ncAsm: { ...current, mode: args.mode, ambientMode: args.ambientMode, level: args.level } };
+    return (await previewDetail(args.id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_nc_asm", { ...args });
+}
+
+/** Selects an equalizer preset by id. Same error strings as setNcAsm. */
+export async function setEqPreset(id: string, preset: number): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    const detail = await previewHeadsetWrite(id);
+    const eq = detail.headset.eq;
+    const entry = eq?.presets.find((p) => p.id === preset);
+    if (!eq || !entry) throw "outOfRange";
+    previewHeadset = { ...previewHeadset, eq: { ...eq, preset, presetName: entry.name } };
+    return (await previewDetail(id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_eq_preset", { id, preset });
+}
+
+/** Writes the six band steps (0..stepCount-1); the backend switches to the Custom preset first. Same error strings as setNcAsm. */
+export async function setEqBands(id: string, bands: number[]): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    const detail = await previewHeadsetWrite(id);
+    const eq = detail.headset.eq;
+    if (!eq || bands.length !== eq.bands.length || bands.some((b) => !Number.isInteger(b) || b < 0 || b >= eq.stepCount)) throw "outOfRange";
+    const custom = eq.presets.find((p) => p.name === "custom");
+    previewHeadset = { ...previewHeadset, eq: { ...eq, bands, preset: custom?.id ?? eq.preset, presetName: custom ? "custom" : eq.presetName } };
+    return (await previewDetail(id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_eq_bands", { id, bands });
+}
+
+/**
+ * Switches sidetone or multipoint. Multipoint needs confirmDisconnect: true (otherwise "confirmRequired") and
+ * the headset reconnects; the returned detail may be disconnected and the final state arrives through
+ * onDeviceDetailChanged. Also rejects with "alertMissing" and "alertRefused", plus the setNcAsm strings.
+ */
+export async function setHeadsetToggle(id: string, setting: HeadsetToggle, on: boolean, confirmDisconnect?: boolean): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    const detail = await previewHeadsetWrite(id);
+    if (setting === "multipoint") {
+      if (!confirmDisconnect) throw "confirmRequired";
+      await wait(1500);
+    }
+    previewHeadset = { ...previewHeadset, [setting]: on };
+    return (await previewDetail(id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_headset_toggle", { id, setting, on, ...(confirmDisconnect ? { confirmDisconnect } : {}) });
 }
 
 /** Last DPI and report rate the user applied to this device, stored on the PC. */

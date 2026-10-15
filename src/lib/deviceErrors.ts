@@ -7,6 +7,27 @@ export function errorCode(error: unknown): string {
   return "";
 }
 
+const headsetErrorKeys = {
+  writesDisabled: "hs.err.writesDisabled",
+  disconnected: "hs.err.disconnected",
+  outOfRange: "hs.err.outOfRange",
+  notSupported: "hs.err.notSupported",
+  verifyFailed: "hs.err.verifyFailed",
+  confirmRequired: "hs.err.confirmRequired",
+  alertMissing: "hs.err.alertMissing",
+  alertRefused: "hs.err.alertRefused",
+  "deviceError:timeout": "hs.err.timeout",
+} as const satisfies Record<string, MessageKey>;
+
+/** Maps a headset write error code to a localized message key plus placeholder values. */
+export function headsetErrorMessage(error: unknown): { key: MessageKey; vars?: Record<string, string> } {
+  const code = errorCode(error);
+  const known = (headsetErrorKeys as Record<string, MessageKey | undefined>)[code];
+  if (known) return { key: known };
+  if (code.startsWith("deviceError:")) return { key: "hs.err.device", vars: { code: code.slice("deviceError:".length) } };
+  return { key: "hs.err.unknown" };
+}
+
 /** Maps a set_dpi / set_report_rate error code to a localized message key plus placeholder values. */
 export function deviceErrorMessage(error: unknown): { key: MessageKey; vars?: Record<string, string> } {
   const code = errorCode(error);

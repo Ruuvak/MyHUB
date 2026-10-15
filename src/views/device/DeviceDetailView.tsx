@@ -48,7 +48,7 @@ export function DeviceDetailView({ summary, ui, onUiChange, onOpenSettings }: De
 
       {detail.headset ? (
         <div className="animate-page">
-          <HeadsetPanel detail={detail} />
+          <HeadsetPanel detail={detail} onDetail={applyDetail} />
         </div>
       ) : detail.dpi || detail.onboard ? (
         <>
