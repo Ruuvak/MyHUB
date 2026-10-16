@@ -7,10 +7,11 @@
 use std::ffi::CString;
 
 use hidapi::HidApi;
+use keychron_proto::Target;
 
 use crate::error::SessionError;
 use crate::link::LinkError;
-use crate::{PID, RAW_HID_INTERFACE, USAGE, USAGE_PAGE, VID};
+use crate::{LINK_PID, LINK_RAW_HID_INTERFACE, PID, RAW_HID_INTERFACE, USAGE, USAGE_PAGE, VID};
 
 /// One enumerated HID entry of this keyboard (VID and PID already matched).
 pub(crate) struct Entry {
@@ -65,9 +66,24 @@ pub(crate) fn select(
     Err(SelectError::NoDevice)
 }
 
-pub(crate) fn enumerate(api: &HidApi) -> Vec<Entry> {
+/// PID and Linux fallback interface of the device a session of `target` talks to.
+pub(crate) fn ids(target: Target) -> (u16, Option<i32>) {
+    match target {
+        Target::Keyboard => (PID, RAW_HID_INTERFACE),
+        Target::Receiver => (LINK_PID, LINK_RAW_HID_INTERFACE),
+    }
+}
+
+pub(crate) fn not_found(target: Target) -> SessionError {
+    match target {
+        Target::Keyboard => SessionError::NotFound,
+        Target::Receiver => SessionError::ReceiverNotFound,
+    }
+}
+
+pub(crate) fn enumerate(api: &HidApi, pid: u16) -> Vec<Entry> {
     api.device_list()
-        .filter(|d| d.vendor_id() == VID && d.product_id() == PID)
+        .filter(|d| d.vendor_id() == VID && d.product_id() == pid)
         .map(|d| Entry {
             interface: d.interface_number(),
             usage_page: d.usage_page(),
@@ -78,31 +94,42 @@ pub(crate) fn enumerate(api: &HidApi) -> Vec<Entry> {
         .collect()
 }
 
-pub(crate) fn select_error(e: SelectError) -> SessionError {
+pub(crate) fn select_error(e: SelectError, target: Target) -> SessionError {
     match e {
-        SelectError::NoDevice => SessionError::NotFound,
+        SelectError::NoDevice => not_found(target),
         SelectError::UsagePageUnavailable => SessionError::UsagePageUnavailable,
     }
 }
 
-/// One HID interface of the keyboard, as `kc_probe list` shows it. No serial, no path.
+/// One HID interface of the keyboard or the receiver, as `kc_probe list` shows it. No
+/// serial, no path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceInfo {
     pub interface: i32,
     pub usage_page: u16,
     pub usage: u16,
     pub product: Option<String>,
-    /// True when `Session::open` would use this interface.
+    /// True when `Session::open` (or `open_receiver`) would use this interface.
     pub matched: bool,
 }
 
 /// Every HID entry with the keyboard's VID and PID, with a flag for the ones that match
 /// the raw HID rule. Opens nothing.
 pub fn list_interfaces() -> Result<Vec<InterfaceInfo>, SessionError> {
+    list_for(Target::Keyboard)
+}
+
+/// The same for the Keychron Link receiver (VID 0x3434, PID [`crate::LINK_PID`]).
+pub fn list_receiver_interfaces() -> Result<Vec<InterfaceInfo>, SessionError> {
+    list_for(Target::Receiver)
+}
+
+fn list_for(target: Target) -> Result<Vec<InterfaceInfo>, SessionError> {
     let api =
         HidApi::new().map_err(|_| LinkError::Hid("could not enumerate HID devices".into()))?;
-    let entries = enumerate(&api);
-    let chosen = select(&entries, RAW_HID_INTERFACE).unwrap_or_default();
+    let (pid, fallback) = ids(target);
+    let entries = enumerate(&api, pid);
+    let chosen = select(&entries, fallback).unwrap_or_default();
     Ok(entries
         .iter()
         .enumerate()

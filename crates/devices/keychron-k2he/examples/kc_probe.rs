@@ -6,11 +6,16 @@
 //! `kc_probe watch <seconds>`
 //! `kc_probe profile`
 //! `kc_probe set profile <1..3> [--save]`
+//! `kc_probe link [--trace]`
 //!
-//! * `list`: the HID interfaces with the keyboard's VID and PID: interface number, usage
-//!   page, usage, product string, and how many of them match the raw HID rule (usage
-//!   page 0xFF60, usage 0x61). Opens nothing, sends nothing. No serial number and no
-//!   device path is read or printed.
+//! * `list`: the HID interfaces with the keyboard's VID and PID, then those of the
+//!   Keychron Link receiver (PID 0xD030): interface number, usage page, usage, product
+//!   string, and how many of them match the raw HID rule (usage page 0xFF60, usage
+//!   0x61). Opens nothing, sends nothing. No serial number and no device path is read or
+//!   printed. Exit code 1 only when neither has a raw HID interface.
+//! * `link [--trace]`: opens the receiver (not the keyboard) and sends B1, B2 and B3 once
+//!   each: receiver protocol, flags, firmware and the linked keyboard. Read only; nothing
+//!   else can be sent over a receiver session.
 //! * `state`: opens the first matching interface and reads the full snapshot. Prints a
 //!   human summary, or pretty JSON with `--json`. `--trace` prints every frame to stderr
 //!   with its direction and, for input reports, the length the backend returned (32, or
@@ -41,13 +46,15 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use keychron_k2he::{
-    DISPLAY_NAME, FrameDirection, Incoming, Session, SessionError, Snapshot, list_interfaces,
+    DISPLAY_NAME, FrameDirection, Incoming, InterfaceInfo, LINK_PID, LinkSnapshot, Session,
+    SessionError, Snapshot, list_interfaces, list_receiver_interfaces, read_link,
     read_profiles_info, read_snapshot, select_profile,
 };
 use keychron_proto::he::{KeyMode, KeyWord};
 
 enum Command {
     List,
+    Link { trace: bool },
     State { json: bool, trace: bool },
     Watch(u64),
     Profile,
@@ -68,6 +75,16 @@ fn parse_args() -> Option<Command> {
                 }
             }
             Some(Command::State { json, trace })
+        }
+        "link" => {
+            let mut trace = false;
+            for a in args {
+                match a.as_str() {
+                    "--trace" => trace = true,
+                    _ => return None,
+                }
+            }
+            Some(Command::Link { trace })
         }
         "watch" => {
             let seconds = args.next()?.parse().ok()?;
@@ -114,7 +131,9 @@ fn trace(direction: FrameDirection, bytes: &[u8]) {
 
 fn exit_for(e: &SessionError) -> ExitCode {
     match e {
-        SessionError::NotFound | SessionError::UsagePageUnavailable => ExitCode::from(1),
+        SessionError::NotFound
+        | SessionError::ReceiverNotFound
+        | SessionError::UsagePageUnavailable => ExitCode::from(1),
         _ => ExitCode::from(3),
     }
 }
@@ -122,12 +141,13 @@ fn exit_for(e: &SessionError) -> ExitCode {
 fn main() -> ExitCode {
     let Some(command) = parse_args() else {
         eprintln!(
-            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | set profile <1..3> [--save]"
+            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | set profile <1..3> [--save] | link [--trace]"
         );
         return ExitCode::from(2);
     };
     match command {
         Command::List => list(),
+        Command::Link { trace: t } => run_with(Session::open_receiver, link, t),
         Command::State { json, trace: t } => run(|s| state(s, json), t),
         Command::Watch(seconds) => run(|s| watch(s, seconds), false),
         Command::Profile => run(current_profile, false),
@@ -135,15 +155,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn list() -> ExitCode {
-    let found = match list_interfaces() {
+/// Prints one device's interfaces; the number matching the raw HID rule, or `None` when
+/// the enumeration failed.
+fn print_interfaces(found: &Result<Vec<InterfaceInfo>, SessionError>, what: &str) -> Option<usize> {
+    let found = match found {
         Ok(f) => f,
         Err(e) => {
             eprintln!("{e}");
-            return ExitCode::from(3);
+            return None;
         }
     };
-    for i in &found {
+    for i in found {
         println!(
             "interface {:>2}  usage page {:#06x}  usage {:#04x}  product {:?}{}",
             i.interface,
@@ -155,21 +177,41 @@ fn list() -> ExitCode {
     }
     let matching = found.iter().filter(|i| i.matched).count();
     println!(
-        "{} HID entries with the {DISPLAY_NAME} VID/PID, {matching} matching the raw HID rule",
+        "{} HID entries with the {what} VID/PID, {matching} matching the raw HID rule",
         found.len()
     );
-    if matching == 0 {
-        eprintln!("no raw HID interface found (keyboard on the cable?)");
-        return ExitCode::from(1);
+    Some(matching)
+}
+
+fn list() -> ExitCode {
+    let keyboard = print_interfaces(&list_interfaces(), DISPLAY_NAME);
+    let receiver = print_interfaces(
+        &list_receiver_interfaces(),
+        &format!("Keychron Link receiver ({LINK_PID:#06x})"),
+    );
+    match (keyboard, receiver) {
+        (None, _) | (_, None) => ExitCode::from(3),
+        (Some(0), Some(0)) => {
+            eprintln!("no raw HID interface found (keyboard on the cable or receiver plugged in?)");
+            ExitCode::from(1)
+        }
+        _ => ExitCode::SUCCESS,
     }
-    ExitCode::SUCCESS
 }
 
 fn run(
     f: impl FnOnce(&mut Session<keychron_k2he::HidapiLink>) -> Result<(), SessionError>,
     with_trace: bool,
 ) -> ExitCode {
-    let mut session = match Session::open() {
+    run_with(Session::open, f, with_trace)
+}
+
+fn run_with(
+    open: fn() -> Result<Session<keychron_k2he::HidapiLink>, SessionError>,
+    f: impl FnOnce(&mut Session<keychron_k2he::HidapiLink>) -> Result<(), SessionError>,
+    with_trace: bool,
+) -> ExitCode {
+    let mut session = match open() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("open failed: {e}");
@@ -205,6 +247,51 @@ fn state(session: &mut Session<keychron_k2he::HidapiLink>, json: bool) -> Result
         summary(&snapshot);
     }
     Ok(())
+}
+
+fn link(session: &mut Session<keychron_k2he::HidapiLink>) -> Result<(), SessionError> {
+    let snapshot = read_link(session)?;
+    link_summary(&snapshot);
+    Ok(())
+}
+
+fn link_summary(s: &LinkSnapshot) {
+    match &s.info {
+        Some(i) => println!(
+            "receiver protocol {}, flags {:#04x} (state notify {}, multi device {}, mouse driver {}, gamepad input disable {}), byte 4 {}",
+            i.version,
+            i.flags.raw,
+            i.flags.state_notify_over_via,
+            i.flags.multi_device,
+            i.flags.mouse_driver_over_via,
+            i.flags.via_disable_gamepad_input,
+            i.byte4
+        ),
+        None => println!("receiver protocol: no answer"),
+    }
+    println!(
+        "receiver firmware {}",
+        s.firmware.as_deref().unwrap_or("no answer")
+    );
+    let st = &s.state;
+    if st.is_k2he() {
+        println!("{DISPLAY_NAME} connected over 2.4 GHz");
+    } else if st.connected {
+        println!(
+            "other device linked: {:04x}:{:04x}",
+            st.linked_vid, st.linked_pid
+        );
+    } else {
+        println!("no keyboard linked");
+    }
+    println!(
+        "link state: connected {}, linked {:04x}:{:04x}, byte 1 {}",
+        st.connected, st.linked_vid, st.linked_pid, st.raw_byte1
+    );
+    for n in &s.notes {
+        println!("note: {}: {}", n.section, n.error);
+    }
+    println!("{} requests", s.requests);
 }
 
 fn current_profile(session: &mut Session<keychron_k2he::HidapiLink>) -> Result<(), SessionError> {

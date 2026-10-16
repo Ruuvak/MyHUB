@@ -31,10 +31,9 @@
 use std::time::{Duration, Instant};
 
 use hidapi::HidApi;
-use keychron_proto::{CheckedRequest, FRAME_LEN, Frame, Policy, Request, Tier};
+use keychron_proto::{CheckedRequest, FRAME_LEN, Frame, Policy, Request, Target, Tier};
 
-use crate::RAW_HID_INTERFACE;
-use crate::discovery::{enumerate, select, select_error};
+use crate::discovery::{enumerate, ids, select, select_error};
 use crate::error::SessionError;
 use crate::hid::HidapiLink;
 use crate::link::{LinkError, READ_BUF_LEN, REPORT_LEN, RawLink};
@@ -158,12 +157,21 @@ pub struct Session<L: RawLink> {
     matched: usize,
     /// When the last write-tier frame went out.
     last_write: Option<Instant>,
+    /// The device this session talks to; fixed at open.
+    target: Target,
 }
 
 impl<L: RawLink> Session<L> {
-    /// A session over any link (mocks in tests). Read-only policy.
+    /// A keyboard session over any link (mocks in tests). Read-only policy.
     pub fn with_link(link: L) -> Self {
+        Self::with_link_for(link, Target::Keyboard)
+    }
+
+    /// A session over any link for `target`. Requests meant for the other target are
+    /// refused with [`SessionError::TargetMismatch`] before any byte is written.
+    pub fn with_link_for(link: L, target: Target) -> Self {
         Session {
+            target,
             link,
             policy: Policy::read_only(),
             events: Vec::new(),
@@ -177,6 +185,11 @@ impl<L: RawLink> Session<L> {
             matched: 1,
             last_write: None,
         }
+    }
+
+    /// The device this session talks to.
+    pub fn target(&self) -> Target {
+        self.target
     }
 
     pub fn set_frame_trace(&mut self, trace: FrameTrace) {
@@ -245,6 +258,12 @@ impl<L: RawLink> Session<L> {
         policy: &Policy,
         request: Request,
     ) -> Result<Frame, SessionError> {
+        if request.target() != self.target {
+            return Err(SessionError::TargetMismatch {
+                request: request.target(),
+                session: self.target,
+            });
+        }
         let checked = policy.check(&request)?;
         // Nothing is read while backing off, so the stale list stays as it is.
         if let Some(left) = self.backoff_remaining() {
@@ -458,13 +477,24 @@ impl Session<HidapiLink> {
     /// is used; [`Session::matched_interfaces`] says how many there were. Nothing is
     /// written.
     pub fn open() -> Result<Self, SessionError> {
+        Self::open_target(Target::Keyboard)
+    }
+
+    /// Finds the Keychron Link receiver's raw HID interface (PID [`crate::LINK_PID`]) and
+    /// opens it. Same rules as [`Session::open`]. Only B1..B3 can be sent over it.
+    pub fn open_receiver() -> Result<Self, SessionError> {
+        Self::open_target(Target::Receiver)
+    }
+
+    fn open_target(target: Target) -> Result<Self, SessionError> {
         let api =
             HidApi::new().map_err(|_| LinkError::Hid("could not enumerate HID devices".into()))?;
-        let entries = enumerate(&api);
-        let chosen = select(&entries, RAW_HID_INTERFACE).map_err(select_error)?;
+        let (pid, fallback) = ids(target);
+        let entries = enumerate(&api, pid);
+        let chosen = select(&entries, fallback).map_err(|e| select_error(e, target))?;
         let first = &entries[chosen[0]];
         let link = HidapiLink::open(&api, &first.path)?;
-        let mut session = Session::with_link(link);
+        let mut session = Session::with_link_for(link, target);
         session.matched = chosen.len();
         Ok(session)
     }

@@ -92,9 +92,24 @@ impl TravelMode {
     }
 }
 
+/// Which device a request is meant for. The Keychron Link receiver answers only its own
+/// B1..B3 commands [OBS]; every keyboard frame sent to it times out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Target {
+    Keyboard,
+    Receiver,
+}
+
 /// Every request the crate can express. The allowlist is exactly these variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
+    // Read tier, Keychron Link receiver (target Receiver).
+    /// `B1` FR_GET_PROTOCOL_VERSION.
+    LinkProtocol,
+    /// `B2` FR_GET_STATE.
+    LinkState,
+    /// `B3` FR_GET_FW_VERSION.
+    LinkFirmware,
     // Read tier, VIA.
     /// `01`.
     GetViaProtocol,
@@ -233,6 +248,14 @@ impl Request {
         }
     }
 
+    /// The device this request is for: B1..B3 go to the receiver, all else to the keyboard.
+    pub fn target(&self) -> Target {
+        match self {
+            Request::LinkProtocol | Request::LinkState | Request::LinkFirmware => Target::Receiver,
+            _ => Target::Keyboard,
+        }
+    }
+
     fn profile(&self) -> Option<u8> {
         match *self {
             Request::GetProfileBuffer { profile, .. }
@@ -332,6 +355,9 @@ impl Request {
     /// The wire frame. Crate private: only a `CheckedRequest` exposes bytes.
     pub(crate) fn to_frame(self) -> Frame {
         match self {
+            Request::LinkProtocol => put(&[0xB1]),
+            Request::LinkState => put(&[0xB2]),
+            Request::LinkFirmware => put(&[0xB3]),
             Request::GetViaProtocol => put(&[0x01]),
             Request::GetViaJsonVersion => put(&[0x02, 0x04]),
             Request::GetLight { id } => put(&[0x08, 0x03, id.value_id()]),
@@ -418,7 +444,10 @@ impl Request {
     pub fn matches(&self, reply: &Frame) -> bool {
         let f = self.to_frame();
         let n = match self {
-            Request::GetViaProtocol
+            Request::LinkProtocol
+            | Request::LinkState
+            | Request::LinkFirmware
+            | Request::GetViaProtocol
             | Request::GetLayerCount
             | Request::GetMacroCount
             | Request::GetMacroBufferSize
@@ -468,6 +497,9 @@ impl Request {
         };
         let be = u16::from_be_bytes([f[1], f[2]]);
         match (f[0], f[1]) {
+            (0xB1, _) => exact(1, Request::LinkProtocol),
+            (0xB2, _) => exact(1, Request::LinkState),
+            (0xB3, _) => exact(1, Request::LinkFirmware),
             (0x01, _) => exact(1, Request::GetViaProtocol),
             (0x02, 0x04) => exact(2, Request::GetViaJsonVersion),
             (0x08, 0x03) => {
@@ -592,7 +624,10 @@ mod tests {
     /// Compile error when a variant is added without a sample below.
     fn _every_variant(r: Request) {
         match r {
-            Request::GetViaProtocol
+            Request::LinkProtocol
+            | Request::LinkState
+            | Request::LinkFirmware
+            | Request::GetViaProtocol
             | Request::GetViaJsonVersion
             | Request::GetLight { .. }
             | Request::GetLayerCount
@@ -631,6 +666,9 @@ mod tests {
     #[test]
     fn parse_inverts_to_frame_for_every_variant() {
         let samples = [
+            Request::LinkProtocol,
+            Request::LinkState,
+            Request::LinkFirmware,
             Request::GetViaProtocol,
             Request::GetViaJsonVersion,
             Request::GetLight { id: LightId::Color },
@@ -705,5 +743,53 @@ mod tests {
         for r in samples {
             assert_eq!(Request::parse(&r.to_frame()), Ok(r), "{r:?}");
         }
+    }
+
+    #[test]
+    fn only_b1_to_b3_target_the_receiver() {
+        let receiver = [
+            Request::LinkProtocol,
+            Request::LinkState,
+            Request::LinkFirmware,
+        ];
+        for r in receiver {
+            assert_eq!(r.target(), Target::Receiver, "{r:?}");
+            assert_eq!(r.tier(), Tier::Read);
+        }
+        assert_eq!(Request::GetViaProtocol.target(), Target::Keyboard);
+        assert_eq!(Request::GetProfilesInfo.target(), Target::Keyboard);
+        assert_eq!(
+            Request::SelectProfile { profile: 0 }.target(),
+            Target::Keyboard
+        );
+    }
+
+    #[test]
+    fn other_receiver_commands_are_not_allowlisted() {
+        for byte in [0xB5u8, 0xBC, 0xB4, 0xB0] {
+            let mut f = [0u8; FRAME_LEN];
+            f[0] = byte;
+            assert_eq!(
+                Request::parse(&f),
+                Err(PolicyError::NotAllowlisted {
+                    command: byte,
+                    sub: 0
+                })
+            );
+        }
+        let mut dfu = [0u8; FRAME_LEN];
+        dfu[0] = 0xBA;
+        assert!(matches!(
+            Request::parse(&dfu),
+            Err(PolicyError::Forbidden { command: 0xBA, .. })
+        ));
+    }
+
+    #[test]
+    fn receiver_replies_match_on_byte_zero_only() {
+        let mut reply = [0u8; FRAME_LEN];
+        reply[..7].copy_from_slice(&[0xB2, 0x01, 0x34, 0x34, 0x20, 0x0E, 0x01]);
+        assert!(Request::LinkState.matches(&reply));
+        assert!(!Request::LinkProtocol.matches(&reply));
     }
 }

@@ -25,14 +25,14 @@ pub fn decode_kc_version(r: &Frame) -> Result<KcVersion, DecodeError> {
     })
 }
 
-/// A1 reply: every nonzero byte from index 1 is a character; zero bytes are skipped,
-/// not treated as a terminator [OBS launcher behaviour]. The launcher's optional `v`
-/// prefix repair is not applied.
+/// A1 reply: printable ASCII (0x20..=0x7E) from index 1 is kept; zero and other bytes
+/// are skipped, not treated as a terminator [OBS launcher behaviour]. The launcher's
+/// optional `v` prefix repair is not applied.
 pub fn decode_firmware(r: &Frame) -> Result<String, DecodeError> {
     expect(r, &[0xA1])?;
     Ok(r[1..]
         .iter()
-        .filter(|&&b| b != 0)
+        .filter(|b| (0x20..=0x7E).contains(*b))
         .map(|&b| char::from(b))
         .collect())
 }

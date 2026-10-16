@@ -11,6 +11,10 @@
 //! The session treats any unexpected report as foreign traffic, fails the request and
 //! backs off for 5 seconds. See [`SessionError::ForeignTraffic`].
 //!
+//! [`Session::open_receiver`] opens the Keychron Link receiver instead (read only: B1..B3,
+//! see [`read_link`]); a session has a fixed [`keychron_proto::Target`] and refuses
+//! requests meant for the other device before any byte is written.
+//!
 //! The serial number and the device path are never read into output. Evidence tags
 //! as in keychron-proto: `[OBS]` seen on the keyboard, `[INF]` inference, `[UNK]` gap.
 
@@ -19,15 +23,17 @@ mod discovery;
 mod error;
 mod hid;
 mod link;
+mod linkrx;
 mod session;
 mod snapshot;
 mod writes;
 
 pub use detail::to_detail;
-pub use discovery::{InterfaceInfo, list_interfaces};
+pub use discovery::{InterfaceInfo, list_interfaces, list_receiver_interfaces};
 pub use error::SessionError;
 pub use hid::HidapiLink;
 pub use link::{FRAME_LEN, LinkError, READ_BUF_LEN, REPORT_LEN, RawLink};
+pub use linkrx::{LinkSnapshot, read_link, read_link_state};
 pub use session::{
     Event, FOREIGN_BACKOFF, FrameDirection, FrameTrace, Incoming, MIN_REPLY_TIMEOUT, READ_RETRIES,
     REPLY_TIMEOUT, Session, WRITE_GAP,
@@ -53,6 +59,13 @@ pub const USAGE: u16 = 0x61;
 /// USB interface number of the raw HID collection, for backends that report usage page 0
 /// (Linux hidraw). [UNK] not known yet, so the fallback refuses.
 pub const RAW_HID_INTERFACE: Option<i32> = None;
+/// USB product ID of the Keychron Link receiver (2.4 GHz) [OBS]. Over the receiver only
+/// B1..B3 get answers; every keyboard frame times out [OBS].
+pub const LINK_PID: u16 = 0xD030;
+/// Interface number of the receiver's raw HID collection for backends that report usage
+/// page 0 (Linux hidraw). [OBS] interface 3 on one Windows PC, [UNK] on Linux, so the
+/// fallback refuses.
+pub const LINK_RAW_HID_INTERFACE: Option<i32> = None;
 /// Key matrix rows, from the keyboard definition [OBS layout from the keymap read: 96
 /// slots per layer]. VIA has no matrix query.
 pub const MATRIX_ROWS: u8 = 6;

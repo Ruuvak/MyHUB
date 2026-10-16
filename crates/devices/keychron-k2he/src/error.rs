@@ -1,6 +1,6 @@
 //! Session errors.
 
-use keychron_proto::{DecodeError, PolicyError};
+use keychron_proto::{DecodeError, PolicyError, Target};
 use thiserror::Error;
 
 use crate::link::LinkError;
@@ -32,6 +32,13 @@ pub enum SessionError {
     /// No raw HID interface of the K2 HE found.
     #[error("no Keychron K2 HE raw HID interface found")]
     NotFound,
+    /// No raw HID interface of the Keychron Link receiver found.
+    #[error("no Keychron Link receiver raw HID interface found")]
+    ReceiverNotFound,
+    /// The request is for the other device (keyboard frame on a receiver session, or the
+    /// reverse). Refused before any byte is written.
+    #[error("a {request:?} request cannot go over a {session:?} session")]
+    TargetMismatch { request: Target, session: Target },
     /// The backend reports no usage page and the raw HID interface number is unknown.
     #[error("the OS reports no HID usage page and the raw HID interface number is not known")]
     UsagePageUnavailable,

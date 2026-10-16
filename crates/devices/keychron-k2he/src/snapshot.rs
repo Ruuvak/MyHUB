@@ -107,7 +107,7 @@ pub struct Snapshot {
 }
 
 /// One request, decoded.
-fn ask<L, T>(
+pub(crate) fn ask<L, T>(
     s: &mut Session<L>,
     request: Request,
     decode: impl FnOnce(&Frame) -> Result<T, DecodeError>,
@@ -120,7 +120,7 @@ where
 }
 
 /// Turn a recoverable failure of an optional section into `None` plus a note.
-fn soft<T>(
+pub(crate) fn soft<T>(
     notes: &mut Vec<SectionNote>,
     section: &'static str,
     result: Result<T, SessionError>,

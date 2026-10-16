@@ -6,7 +6,7 @@ use hidapi::{HidApi, HidDevice};
 
 use crate::link::{LinkError, READ_BUF_LEN, REPORT_LEN, RawLink};
 
-/// The keyboard's raw HID interface, opened read and write.
+/// The keyboard's or the receiver's raw HID interface, opened read and write.
 pub struct HidapiLink {
     dev: HidDevice,
 }
