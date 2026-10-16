@@ -48,6 +48,7 @@ pub fn to_detail(snapshot: &Snapshot, link_up: bool, updated_at_ms: u64) -> Devi
         }),
         onboard: Some(onboard_view(snapshot)),
         headset: None,
+        keyboard: None,
     }
 }
 

@@ -5,6 +5,7 @@ import { BatteryPill } from "../components/device/BatteryPill";
 import { DeviceIllustration } from "../components/device/DeviceIllustration";
 import { ModeSwitch } from "../components/device/ModeSwitch";
 import { ModeChip } from "../components/device/ModeChip";
+import { ReadOnlyNote } from "../components/device/ReadOnlyNote";
 import { RefreshButton } from "../components/device/RefreshButton";
 import { useUpdatedAgo } from "../components/device/useUpdatedAgo";
 import { DeviceIcon } from "../components/DeviceIcon";
@@ -25,6 +26,9 @@ import { useDeviceDetail, useDevices } from "../state/devices";
 import { SoundModeSwitch } from "./device/HeadsetPanel";
 import { useHeadsetWrite } from "./device/useHeadsetWrite";
 import { useSettings } from "../state/settings";
+import { activeHeProfile, brightnessPercent, formatMm, heModeKey, profileDisplayName } from "../lib/keyboard";
+import { EffectName } from "./device/KeyboardPanel";
+import { useKeyboardRefresh } from "./device/useKeyboardRefresh";
 
 /** Compact tray flyout card, rendered when the window label is "flyout". The tiles are read-only; they open the main window. */
 export function FlyoutView() {
@@ -81,6 +85,8 @@ export function FlyoutView() {
             ) : (
               detail.headset ? (
                 <HeadsetFlyoutBody detail={detail} summary={selected} onDetail={applyDetail} />
+              ) : detail.keyboard ? (
+                <KeyboardFlyoutBody detail={detail} onDetail={applyDetail} />
               ) : (
                 <FlyoutBody detail={detail} summary={selected} onOpenTab={openWindow} onDetail={applyDetail} />
               )
@@ -138,7 +144,7 @@ function FlyoutHeader({
   );
 }
 
-/** Pill row, one pill per device: kind icon plus battery percent, or "asleep" while disconnected. */
+/** Pill row, one pill per device: kind icon plus battery percent (the name for a device without a battery), or "asleep" while disconnected. */
 function DeviceSwitcher({
   devices,
   selectedId,
@@ -172,10 +178,12 @@ function DeviceSwitcher({
             <span className={cx(selected && "text-accent")}>
               <DeviceIcon kind={device.kind} size={16} />
             </span>
-            {connected && device.batteryPercent !== null ? (
+            {!connected ? (
+              <span>{t("device.asleep")}</span>
+            ) : device.batteryPercent !== null ? (
               <span className="font-mono tabular-nums">{device.batteryPercent}%</span>
             ) : (
-              <span>{t("device.asleep")}</span>
+              <span>{device.name}</span>
             )}
           </button>
         );
@@ -382,6 +390,65 @@ function HeadsetFlyoutBody({
         </div>
       </div>
     </>
+  );
+}
+
+/** Keyboard card: active HE profile with mode and actuation, lighting effect with brightness, and the other-configurator note. Read only. */
+function KeyboardFlyoutBody({ detail, onDetail }: { detail: DeviceDetail; onDetail: (next: DeviceDetail) => void }) {
+  const t = useT();
+  useKeyboardRefresh(detail.id, onDetail);
+  const keyboard = detail.keyboard;
+  const connected = detail.connection === "connected";
+  const profile = keyboard ? activeHeProfile(keyboard) : null;
+  const lighting = keyboard?.lighting ?? null;
+
+  return (
+    <>
+      <div className="px-4">
+        <div className="relative flex justify-center">
+          <DeviceIllustration illustration={detail.illustration} kind={detail.kind} size={150} dimmed={!connected} asleep={!connected} />
+        </div>
+        <div className="text-center">
+          <h1 className="min-w-0 truncate text-lg font-semibold text-text">{detail.name}</h1>
+          <p className="flex items-center justify-center gap-1.5 text-sm text-text-muted">
+            <TransportIcon transport={detail.transport} />
+            <span className="truncate">
+              {t("device.subline", { vendor: detail.vendor, transport: detail.transport, protocol: detail.protocol })}
+            </span>
+          </p>
+        </div>
+      </div>
+
+      <div className="px-4 pt-3 pb-3">
+        <div className={cx("grid grid-cols-2 gap-2", !connected && "opacity-60")}>
+          <InfoTile
+            label={t("keyboard.he.title")}
+            value={profile ? profileDisplayName(profile, t) : "--"}
+            sub={profile ? `${t(heModeKey(profile.mode))}, ${formatMm(profile.actuationMm)}` : undefined}
+          />
+          <InfoTile
+            label={t("keyboard.light.title")}
+            value={lighting ? <EffectName effect={lighting.effect} /> : "--"}
+            sub={lighting ? `${t("keyboard.light.brightness")} ${brightnessPercent(lighting.brightness)}%` : undefined}
+          />
+        </div>
+        {keyboard?.otherConfigurator ? (
+          <div className="mt-2">
+            <ReadOnlyNote icon="info" text={t("keyboard.note.other")} />
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
+function InfoTile({ label, value, sub }: { label: string; value: ReactNode; sub?: string }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1 rounded-control border border-border bg-surface-2 px-3 py-2.5">
+      <span className="truncate text-xs text-text-muted">{label}</span>
+      <span className="truncate text-base font-medium text-text">{value}</span>
+      <span className="h-4 truncate text-xs text-text-muted">{sub}</span>
+    </div>
   );
 }
 

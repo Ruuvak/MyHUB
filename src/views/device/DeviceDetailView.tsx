@@ -14,6 +14,7 @@ import type { DeviceUi } from "../../state/deviceUi";
 import { Badge, SegmentedControl, Skeleton } from "../../ui";
 import { TransportIcon } from "../../components/device/TransportIcon";
 import { HeadsetPanel } from "./HeadsetPanel";
+import { KeyboardPanel } from "./KeyboardPanel";
 import { lowestBud } from "../../lib/headset";
 import { ButtonsTab } from "./ButtonsTab";
 import { PerformanceTab } from "./PerformanceTab";
@@ -49,6 +50,10 @@ export function DeviceDetailView({ summary, ui, onUiChange, onOpenSettings }: De
       {detail.headset ? (
         <div className="animate-page">
           <HeadsetPanel detail={detail} onDetail={applyDetail} />
+        </div>
+      ) : detail.keyboard ? (
+        <div className="animate-page">
+          <KeyboardPanel detail={detail} onDetail={applyDetail} />
         </div>
       ) : detail.dpi || detail.onboard ? (
         <>
@@ -118,6 +123,7 @@ function Hero({
           </Badge>
         </div>
         <div className="mt-4 flex items-end gap-4">
+          {detail.keyboard ? null : (
           <div className="w-44">
             {onPower ? (
               <ChargingLabel battery={detail.battery} className="text-xs" />
@@ -141,6 +147,7 @@ function Hero({
               <div className="font-mono text-2xl font-light text-text-faint">--</div>
             )}
           </div>
+          )}
           <RefreshButton pending={refreshing} onClick={onRefresh} />
         </div>
         {ago ? <p className="mt-2 text-xs text-text-faint">{ago}</p> : null}

@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod device_manager;
 pub mod flyout;
+pub mod keychron;
 pub mod settings;
 pub mod sony;
 pub mod tray;

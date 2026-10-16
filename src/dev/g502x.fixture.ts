@@ -178,6 +178,7 @@ function buildDetail(connected: boolean): DeviceDetail {
     reportRate: { optionsHz: [1000, 500, 250, 125], currentHz: 500 },
     onboard: { mode: "onboard", activeProfile: 3, buttonCount: BUTTON_COUNT, profiles: buildProfiles(), writableProfile: 3 },
     headset: null,
+    keyboard: null,
   };
 }
 

@@ -18,7 +18,7 @@ import type {
 
 // DEV PREVIEW ONLY: used when the UI runs in a plain browser (no Tauri). Settings live in memory
 // and are lost on reload. Devices come from a fixture only when the URL has ?demo=g502x,
-// ?demo=g502x-off, ?demo=sony, ?demo=sony-off or ?demo=all (both devices), otherwise the list is empty. Never reached inside the real app.
+// ?demo=g502x-off, ?demo=sony, ?demo=sony-off, ?demo=k2he, ?demo=k2he-busy or ?demo=all (all devices), otherwise the list is empty. Never reached inside the real app.
 const previewDefaults: Settings = {
   theme: "system",
   language: "auto",

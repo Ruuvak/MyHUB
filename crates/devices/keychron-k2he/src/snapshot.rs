@@ -30,7 +30,7 @@ use serde::Serialize;
 
 use crate::error::SessionError;
 use crate::link::RawLink;
-use crate::session::Session;
+use crate::session::{Event, Session};
 use crate::{MATRIX_COLS, MATRIX_ROWS};
 
 /// VIA protocol version the keyboard must report [OBS 12].
@@ -399,4 +399,43 @@ pub fn read_snapshot<L: RawLink>(s: &mut Session<L>) -> Result<Snapshot, Session
         requests: s.frames_sent() - sent_before,
         notes,
     })
+}
+
+impl Snapshot {
+    /// Fold an unsolicited report into the cached values. `true` when something changed.
+    pub fn apply_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::ProfileChanged { profile } => {
+                let changed = self.profiles_info.current != profile;
+                self.profiles_info.current = profile;
+                changed
+            }
+            Event::EffectChanged { effect } => {
+                let changed = self.light.effect != Some(effect);
+                self.light.effect = Some(effect);
+                changed
+            }
+        }
+    }
+}
+
+/// Light re-read for the UI: the current HE profile (A9 10) and the VIA channel 3
+/// lighting values (08 03 01..04). Read-tier requests only; the cached snapshot is
+/// patched in place. A lighting value that times out keeps its cached value. The profile
+/// info is required: its failure is returned and nothing is patched.
+pub fn refresh_state<L: RawLink>(
+    s: &mut Session<L>,
+    snapshot: &mut Snapshot,
+) -> Result<(), SessionError> {
+    let info = ask(s, GetProfilesInfo, decode_profiles_info)?;
+    let mut notes = Vec::new();
+    let fresh = read_light(s, &mut notes)?;
+    snapshot.profiles_info.current = info.current;
+    let light = &mut snapshot.light;
+    light.brightness = fresh.brightness.or(light.brightness);
+    light.effect = fresh.effect.or(light.effect);
+    light.speed = fresh.speed.or(light.speed);
+    light.hue = fresh.hue.or(light.hue);
+    light.saturation = fresh.saturation.or(light.saturation);
+    Ok(())
 }

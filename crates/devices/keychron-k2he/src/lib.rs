@@ -13,6 +13,7 @@
 //! The serial number and the device path are never read into output. Evidence tags
 //! as in keychron-proto: `[OBS]` seen on the keyboard, `[INF]` inference, `[UNK]` gap.
 
+mod detail;
 mod discovery;
 mod error;
 mod hid;
@@ -20,6 +21,7 @@ mod link;
 mod session;
 mod snapshot;
 
+pub use detail::to_detail;
 pub use discovery::{InterfaceInfo, list_interfaces};
 pub use error::SessionError;
 pub use hid::HidapiLink;
@@ -30,6 +32,7 @@ pub use session::{
 };
 pub use snapshot::{
     LightSettings, Lighting, RegionSlots, SectionNote, Snapshot, VIA_PROTOCOL, read_snapshot,
+    refresh_state,
 };
 
 /// Stable device ID used by the UI and the app's per-device files.

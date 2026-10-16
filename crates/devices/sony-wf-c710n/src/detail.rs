@@ -169,5 +169,6 @@ pub fn to_detail(snapshot: &Snapshot, connected: bool) -> DeviceDetail {
         report_rate: None,
         onboard: None,
         headset: Some(headset_view(snapshot)),
+        keyboard: None,
     }
 }

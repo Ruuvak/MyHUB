@@ -58,5 +58,6 @@ export function buildSonyDetail(connected: boolean): DeviceDetail {
       codec: "AAC",
       firmware: "1.0.5",
     },
+    keyboard: null,
   };
 }

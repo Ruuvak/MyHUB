@@ -26,3 +26,7 @@ hidpp = { workspace = true }
 tauri-plugin-autostart = "2"
 myhub-rfcomm = { workspace = true }
 sony-wf-c710n = { path = "../crates/devices/sony-wf-c710n" }
+keychron-k2he = { workspace = true }
+
+[dev-dependencies]
+keychron-proto = { workspace = true }

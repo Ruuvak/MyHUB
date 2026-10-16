@@ -189,6 +189,78 @@ export interface HeadsetView {
   firmware: string | null;
 }
 
+/** Key work mode of a Hall effect profile. */
+export type HeMode = "global" | "static" | "rapidTrigger";
+
+export interface HeProfileView {
+  index: number;
+  /** null when the profile has no name. */
+  name: string | null;
+  mode: HeMode;
+  actuationMm: number;
+  pressMm: number;
+  releaseMm: number;
+  /** Keys whose own mode is not "global". */
+  perKeyOverrides: number;
+  dksKeys: number;
+  snapPairs: number;
+  analogKeys: number;
+}
+
+export interface HeView {
+  /** 0-based index of the active profile. */
+  currentProfile: number;
+  profiles: HeProfileView[];
+  /** Four [x, y] points of the response curve. */
+  curve: [number, number][] | null;
+}
+
+export interface LightingView {
+  brightness: number;
+  effect: number;
+  speed: number;
+  hue: number;
+  saturation: number;
+  effectMax: number;
+  perKey: boolean;
+  mix: boolean;
+  ledCount: number;
+}
+
+export interface TimersView {
+  backlightOffS: number;
+  sleepS: number;
+  heScanIdleS: number;
+}
+
+export interface KeymapKeyView {
+  row: number;
+  col: number;
+  code: number;
+  /** QMK style name, e.g. "KC_A" or "MO(3)". */
+  label: string;
+}
+
+/** One layer; matrix slots without a physical key are left out. */
+export interface KeymapLayerView {
+  index: number;
+  keys: KeymapKeyView[];
+}
+
+/** Keyboard data (Keychron K2 HE), read only for now. */
+export interface KeyboardView {
+  firmware: string;
+  viaProtocol: number;
+  layerCount: number;
+  defaultLayer: number | null;
+  he: HeView | null;
+  lighting: LightingView | null;
+  timers: TimersView | null;
+  keymap: KeymapLayerView[] | null;
+  /** True while another configurator talks to the keyboard and the app sends nothing. */
+  otherConfigurator: boolean;
+}
+
 export interface DeviceDetail extends DeviceSummary {
   vendor: string;
   transport: string;
@@ -204,4 +276,6 @@ export interface DeviceDetail extends DeviceSummary {
   onboard: OnboardInfo | null;
   /** Set for headsets, null for the mouse. */
   headset: HeadsetView | null;
+  /** Set for keyboards, null for the other devices. */
+  keyboard: KeyboardView | null;
 }

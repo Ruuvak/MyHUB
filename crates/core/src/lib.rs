@@ -40,7 +40,7 @@ pub struct DeviceSummary {
 }
 
 /// The full device view: the summary fields plus everything the UI can show.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceDetail {
     #[serde(flatten)]
@@ -60,6 +60,8 @@ pub struct DeviceDetail {
     pub onboard: Option<OnboardView>,
     /// Headset data (Sony WF-C710N); `None` for devices that are not headsets.
     pub headset: Option<HeadsetView>,
+    /// Keyboard data (Keychron K2 HE); `None` for devices that are not keyboards.
+    pub keyboard: Option<KeyboardView>,
 }
 
 impl DeviceDetail {
@@ -284,6 +286,108 @@ pub struct HeadsetView {
     pub firmware: Option<String>,
 }
 
+/// Key work mode of a Hall effect profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HeModeView {
+    Global,
+    Static,
+    RapidTrigger,
+}
+
+/// One Hall effect profile. The millimetre values are the profile's global word
+/// (0.1 mm steps on the wire).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeProfileView {
+    pub index: u8,
+    /// `None` when the profile has no name.
+    pub name: Option<String>,
+    pub mode: HeModeView,
+    pub actuation_mm: f32,
+    pub press_mm: f32,
+    pub release_mm: f32,
+    /// Keys whose own mode is not `global`.
+    pub per_key_overrides: u16,
+    /// Keys that use a DKS slot.
+    pub dks_keys: u16,
+    /// Used snap tap pairs.
+    pub snap_pairs: u16,
+    /// Keys in analog mode.
+    pub analog_keys: u16,
+}
+
+/// Hall effect state of a keyboard.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeView {
+    /// 0-based index of the active profile.
+    pub current_profile: u8,
+    pub profiles: Vec<HeProfileView>,
+    /// The four points `[x, y]` of the response curve.
+    pub curve: Option<Vec<[u8; 2]>>,
+}
+
+/// Global lighting of a keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightingView {
+    pub brightness: u8,
+    pub effect: u8,
+    pub speed: u8,
+    pub hue: u8,
+    pub saturation: u8,
+    /// Highest effect number the keyboard offers.
+    pub effect_max: u8,
+    pub per_key: bool,
+    pub mix: bool,
+    pub led_count: u8,
+}
+
+/// Idle timers of a keyboard, in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimersView {
+    pub backlight_off_s: u16,
+    pub sleep_s: u16,
+    pub he_scan_idle_s: u16,
+}
+
+/// One key of a keymap layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeymapKeyView {
+    pub row: u8,
+    pub col: u8,
+    pub code: u16,
+    /// QMK style name, e.g. `KC_A` or `MO(3)`.
+    pub label: String,
+}
+
+/// One keymap layer; matrix slots without a physical key are left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeymapLayerView {
+    pub index: u8,
+    pub keys: Vec<KeymapKeyView>,
+}
+
+/// Keyboard specific data (read only for now).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardView {
+    pub firmware: String,
+    pub via_protocol: u8,
+    pub layer_count: u8,
+    pub default_layer: Option<u8>,
+    pub he: Option<HeView>,
+    pub lighting: Option<LightingView>,
+    pub timers: Option<TimersView>,
+    pub keymap: Option<Vec<KeymapLayerView>>,
+    /// Another configurator talks to the keyboard: the app sends nothing and waits.
+    pub other_configurator: bool,
+}
+
 /// One onboard profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -401,6 +505,7 @@ mod tests {
                 current_hz: 1000,
             }),
             headset: None,
+            keyboard: None,
             onboard: Some(OnboardView {
                 mode: Some(OnboardMode::Host),
                 active_profile: None,

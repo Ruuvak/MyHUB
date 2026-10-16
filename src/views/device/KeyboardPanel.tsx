@@ -1,0 +1,245 @@
+import { Clock, Keyboard, Lightbulb, Sliders } from "@phosphor-icons/react";
+import { useState, type ReactNode } from "react";
+import { ReadOnlyNote } from "../../components/device/ReadOnlyNote";
+import { useT } from "../../i18n/useT";
+import { cx } from "../../lib/cx";
+import {
+  brightnessPercent,
+  effectKey,
+  formatDuration,
+  formatMm,
+  heModeKey,
+  hsvSwatch,
+  initialLayer,
+  keyTitle,
+  layerNameKey,
+  profileDisplayName,
+  shortKeyLabel,
+} from "../../lib/keyboard";
+import type { DeviceDetail, HeProfileView, KeyboardView, KeymapLayerView, LightingView } from "../../lib/types";
+import { Badge, Panel, SegmentedControl } from "../../ui";
+import { useKeyboardRefresh } from "./useKeyboardRefresh";
+
+const MATRIX_ROWS = 6;
+const MATRIX_COLS = 16;
+
+/** Keyboard view (Keychron K2 HE), read only: info, HE profiles, lighting, timers and the keymap. Re-reads the keyboard once when shown. */
+export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDetail: (next: DeviceDetail) => void }) {
+  const t = useT();
+  useKeyboardRefresh(detail.id, onDetail);
+  const keyboard = detail.keyboard;
+  if (!keyboard) return null;
+  const connected = detail.connection === "connected";
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className={cx("flex flex-col gap-4", !connected && "opacity-60")}>
+        <Panel title={t("keyboard.info.title")} icon={<Keyboard size={18} weight="regular" aria-hidden="true" />}>
+          <div className="px-4 pb-4">
+            <dl className="flex flex-col divide-y divide-border">
+              <InfoRow label={t("keyboard.firmware")} value={keyboard.firmware || "--"} mono />
+              <InfoRow label={t("keyboard.protocol")} value={detail.protocol} mono />
+              <InfoRow label={t("keyboard.transport")} value={detail.transport} />
+            </dl>
+          </div>
+        </Panel>
+
+        {keyboard.he ? <HeCard keyboard={keyboard} /> : null}
+        {keyboard.lighting ? <LightingCard lighting={keyboard.lighting} /> : null}
+        {keyboard.timers ? <TimersCard timers={keyboard.timers} /> : null}
+        {keyboard.keymap && keyboard.keymap.length > 0 ? <KeymapCard keyboard={keyboard} keymap={keyboard.keymap} /> : null}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        {keyboard.otherConfigurator ? <ReadOnlyNote icon="info" text={t("keyboard.note.other")} /> : null}
+        <ReadOnlyNote icon="info" text={t("keyboard.note.usb")} />
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2.5 text-base">
+      <dt className="shrink-0 text-text-muted">{label}</dt>
+      <dd className={cx("min-w-0 truncate text-right text-text", mono && "font-mono tabular-nums")}>{value}</dd>
+    </div>
+  );
+}
+
+function HeCard({ keyboard }: { keyboard: KeyboardView }) {
+  const t = useT();
+  const he = keyboard.he;
+  if (!he) return null;
+  return (
+    <Panel title={t("keyboard.he.title")} icon={<Sliders size={18} weight="regular" aria-hidden="true" />}>
+      <ul className="flex flex-col gap-2 px-4 pt-2 pb-4">
+        {he.profiles.map((profile) => (
+          <li key={profile.index}>
+            <ProfileRow profile={profile} active={profile.index === he.currentProfile} />
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
+function ProfileRow({ profile, active }: { profile: HeProfileView; active: boolean }) {
+  const t = useT();
+  const counts: Array<{ label: string; value: number }> = [
+    { label: t("keyboard.he.perKey"), value: profile.perKeyOverrides },
+    { label: t("keyboard.he.dks"), value: profile.dksKeys },
+    { label: t("keyboard.he.snap"), value: profile.snapPairs },
+    { label: t("keyboard.he.analog"), value: profile.analogKeys },
+  ].filter((c) => c.value > 0);
+  const rapid = profile.mode === "rapidTrigger";
+
+  return (
+    <div
+      aria-current={active ? "true" : undefined}
+      className={cx(
+        "rounded-control border px-3 py-2.5",
+        active ? "border-accent/60 bg-accent/10" : "border-border bg-surface-2",
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="min-w-0 truncate text-base font-medium text-text">{profileDisplayName(profile, t)}</span>
+        {active ? <Badge tone="accent">{t("keyboard.he.active")}</Badge> : null}
+        <span className="ml-auto text-sm text-text-muted">{t(heModeKey(profile.mode))}</span>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-sm text-text-muted">
+        <Metric label={t("keyboard.he.actuation")} value={formatMm(profile.actuationMm)} />
+        {rapid ? <Metric label={t("keyboard.he.press")} value={formatMm(profile.pressMm)} /> : null}
+        {rapid ? <Metric label={t("keyboard.he.release")} value={formatMm(profile.releaseMm)} /> : null}
+      </div>
+      {counts.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {counts.map((c) => (
+            <Badge key={c.label}>
+              {c.label} {c.value}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <span>
+      {label} <span className="font-mono tabular-nums text-text">{value}</span>
+    </span>
+  );
+}
+
+export function EffectName({ effect }: { effect: number }) {
+  const t = useT();
+  const key = effectKey(effect);
+  return <>{key ? t(key) : t("keyboard.light.effectN", { n: effect })}</>;
+}
+
+function LightingCard({ lighting }: { lighting: LightingView }) {
+  const t = useT();
+  return (
+    <Panel title={t("keyboard.light.title")} icon={<Lightbulb size={18} weight="regular" aria-hidden="true" />}>
+      <div className="px-4 pb-4">
+        <dl className="flex flex-col divide-y divide-border">
+          <InfoRow label={t("keyboard.light.effect")} value={<EffectName effect={lighting.effect} />} />
+          <InfoRow label={t("keyboard.light.brightness")} value={`${brightnessPercent(lighting.brightness)}%`} mono />
+          <InfoRow label={t("keyboard.light.speed")} value={String(lighting.speed)} mono />
+          <InfoRow
+            label={t("keyboard.light.color")}
+            value={<ColorSwatch hue={lighting.hue} saturation={lighting.saturation} />}
+          />
+        </dl>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {lighting.perKey ? <Badge>{t("keyboard.light.perKey")}</Badge> : null}
+          {lighting.mix ? <Badge>{t("keyboard.light.mix")}</Badge> : null}
+          {lighting.ledCount > 0 ? <Badge>{t("keyboard.light.leds", { n: lighting.ledCount })}</Badge> : null}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function TimersCard({ timers }: { timers: NonNullable<KeyboardView["timers"]> }) {
+  const t = useT();
+  return (
+    <Panel title={t("keyboard.timers.title")} icon={<Clock size={18} weight="regular" aria-hidden="true" />}>
+      <div className="px-4 pb-4">
+        <dl className="flex flex-col divide-y divide-border">
+          <InfoRow label={t("keyboard.timers.backlightOff")} value={formatDuration(timers.backlightOffS)} mono />
+          <InfoRow label={t("keyboard.timers.sleep")} value={formatDuration(timers.sleepS)} mono />
+          <InfoRow label={t("keyboard.timers.heScanIdle")} value={formatDuration(timers.heScanIdleS)} mono />
+        </dl>
+      </div>
+    </Panel>
+  );
+}
+
+function KeymapCard({ keyboard, keymap }: { keyboard: KeyboardView; keymap: KeymapLayerView[] }) {
+  const t = useT();
+  const [layer, setLayer] = useState(() => initialLayer(keyboard));
+  const count = Math.max(keyboard.layerCount, keymap.length);
+  const options = Array.from({ length: count }, (_, i) => {
+    const nameKey = layerNameKey(i, keyboard.layerCount);
+    return { value: String(i), label: nameKey ? t(nameKey) : t("keyboard.keymap.layerN", { n: i }) };
+  });
+  const data = keymap.find((l) => l.index === layer);
+  const cells = new Map((data?.keys ?? []).map((k) => [k.row * MATRIX_COLS + k.col, k]));
+
+  return (
+    <Panel title={t("keyboard.keymap.title")} icon={<Keyboard size={18} weight="regular" aria-hidden="true" />}>
+      <div className="flex flex-col gap-3 px-4 pt-2 pb-4">
+        <div className="flex overflow-x-auto">
+          <SegmentedControl label={t("keyboard.keymap.layer")} value={String(layer)} options={options} onChange={(v) => setLayer(Number(v))} />
+        </div>
+        {data ? (
+          <div className="overflow-x-auto pb-1">
+            <div
+              role="group"
+              aria-label={t("keyboard.keymap.grid")}
+              className="grid min-w-[600px] gap-[3px]"
+              style={{ gridTemplateColumns: `repeat(${MATRIX_COLS}, minmax(0, 1fr))` }}
+            >
+              {Array.from({ length: MATRIX_ROWS * MATRIX_COLS }, (_, i) => {
+                const key = cells.get(i);
+                if (!key) return <span key={i} aria-hidden="true" className="h-9" />;
+                return (
+                  <KeyCap key={i} label={shortKeyLabel(key.label)} title={keyTitle(key)} />
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-text-muted">{t("keyboard.keymap.empty")}</p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function KeyCap({ label, title }: { label: string; title: string }) {
+  return (
+    <span
+      title={title}
+      className="flex h-9 min-w-0 items-center justify-center overflow-hidden rounded-[6px] border border-border bg-surface-2 px-0.5 font-mono text-[11px] leading-none text-text"
+    >
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+/** Colour swatch of the lighting colour, with its HSV values as the tooltip. */
+export function ColorSwatch({ hue, saturation, size = 16 }: { hue: number; saturation: number; size?: number }) {
+  return (
+    <span
+      aria-hidden="true"
+      title={`H ${hue} S ${saturation}`}
+      className="inline-block shrink-0 rounded-pill border border-border"
+      style={{ width: size, height: size, background: hsvSwatch(hue, saturation) }}
+    />
+  );
+}
+

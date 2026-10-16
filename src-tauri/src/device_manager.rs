@@ -45,6 +45,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backup;
+use crate::keychron::{KeychronCommand, KeychronWorker};
 use crate::settings::{self, Language, Settings, SettingsState};
 use crate::sony::{SONY_WRITE_WAIT, SonyCommand, SonyWorker, SonyWrite};
 use crate::tray;
@@ -98,6 +99,8 @@ const WRITE_INTERVAL: Duration = Duration::from_millis(250);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// How long shutdown waits for the headset worker.
 const SONY_SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+/// How long shutdown waits for the keyboard worker (it sees the flag within one 200 ms listen).
+const KEYCHRON_SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 /// Pause before the one retry of a failed spy stop, and between later attempts
 /// from the pass loop.
 const SPY_STOP_RETRY: Duration = Duration::from_millis(200);
@@ -110,18 +113,21 @@ pub(crate) enum Slot {
     Logitech,
     /// The headset worker ("sony-worker").
     Sony,
+    /// The keyboard worker ("keychron-worker").
+    Keychron,
 }
 
 impl Slot {
-    /// Every known device in list order (the G502 first, then the headset). A new
+    /// Every known device in list order (the G502, the headset, the keyboard). A new
     /// device is added here, in `id`, `index` and `status_line`.
-    pub(crate) const ALL: [Slot; 2] = [Slot::Logitech, Slot::Sony];
+    pub(crate) const ALL: [Slot; 3] = [Slot::Logitech, Slot::Sony, Slot::Keychron];
 
     /// The device id this slot publishes.
     pub(crate) const fn id(self) -> &'static str {
         match self {
             Slot::Logitech => DEVICE_ID,
             Slot::Sony => sony_wf_c710n::DEVICE_ID,
+            Slot::Keychron => keychron_k2he::DEVICE_ID,
         }
     }
 
@@ -129,6 +135,7 @@ impl Slot {
         match self {
             Slot::Logitech => 0,
             Slot::Sony => 1,
+            Slot::Keychron => 2,
         }
     }
 
@@ -142,6 +149,7 @@ impl Slot {
         match self {
             Slot::Logitech => status_text(Some(detail), language),
             Slot::Sony => headset_status_text(Some(detail), language),
+            Slot::Keychron => keyboard_status_text(Some(detail), language),
         }
     }
 }
@@ -196,6 +204,7 @@ fn route_of(id: &str) -> Option<Slot> {
 struct Router {
     logitech: Sender<Command>,
     sony: Sender<SonyCommand>,
+    keychron: Sender<KeychronCommand>,
 }
 
 impl Router {
@@ -204,6 +213,10 @@ impl Router {
         let (reply, answer) = mpsc::channel();
         let sent = match slot {
             Slot::Sony => self.sony.send(SonyCommand::Refresh { reply }).is_ok(),
+            Slot::Keychron => self
+                .keychron
+                .send(KeychronCommand::Refresh { reply })
+                .is_ok(),
             Slot::Logitech => self
                 .logitech
                 .send(Command::Refresh {
@@ -303,12 +316,14 @@ impl Router {
     fn settings_changed(&self) {
         let _ = self.logitech.send(Command::SettingsChanged);
         let _ = self.sony.send(SonyCommand::SettingsChanged);
+        let _ = self.keychron.send(KeychronCommand::SettingsChanged);
     }
 
     /// Wakes every worker (shutdown).
     fn wake_all(&self) {
         let _ = self.logitech.send(Command::Wake);
         let _ = self.sony.send(SonyCommand::Wake);
+        let _ = self.keychron.send(KeychronCommand::Wake);
     }
 }
 
@@ -403,6 +418,7 @@ pub struct DeviceManager {
     flash_in_flight: Arc<AtomicBool>,
     thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
     sony_thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
+    keychron_thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -453,6 +469,29 @@ impl DeviceManager {
             }
         };
 
+        let (keychron_commands, keychron_rx) = mpsc::channel();
+        let (keychron_done_tx, keychron_done_rx) = mpsc::channel();
+        let keychron_worker = KeychronWorker {
+            app: app.clone(),
+            state: Arc::clone(&state),
+            commands: keychron_rx,
+            shutdown: Arc::clone(&shutdown),
+        };
+        let keychron_spawned =
+            thread::Builder::new()
+                .name("keychron-worker".into())
+                .spawn(move || {
+                    keychron_worker.run();
+                    let _ = keychron_done_tx.send(());
+                });
+        let keychron_thread = match keychron_spawned {
+            Ok(handle) => Some((handle, keychron_done_rx)),
+            Err(e) => {
+                eprintln!("myhub: cannot start the keyboard worker: {e}");
+                None
+            }
+        };
+
         let worker = Worker {
             app,
             config_dir: config_dir.clone(),
@@ -485,11 +524,13 @@ impl DeviceManager {
             router: Router {
                 logitech: commands,
                 sony: sony_commands,
+                keychron: keychron_commands,
             },
             shutdown,
             flash_in_flight,
             thread: Mutex::new(thread),
             sony_thread: Mutex::new(sony_thread),
+            keychron_thread: Mutex::new(keychron_thread),
         }
     }
 
@@ -579,9 +620,14 @@ impl DeviceManager {
             eprintln!("myhub: a flash write is still running after {FLASH_SHUTDOWN_WAIT:?}");
         }
         self.router.wake_all();
-        // Stop order: the headset worker first (it sees the flag within one poll,
-        // 200 ms; a connect in progress is not interrupted), then the G502 worker.
-        // A new worker gets one line here.
+        // Stop order: the keyboard worker first (one listen, 200 ms), then the headset
+        // worker (it sees the flag within one poll, 200 ms; a connect in progress is not
+        // interrupted), then the G502 worker. A new worker gets one line here.
+        join_worker(
+            &self.keychron_thread,
+            KEYCHRON_SHUTDOWN_WAIT,
+            "keyboard worker",
+        );
         join_worker(&self.sony_thread, SONY_SHUTDOWN_WAIT, "headset worker");
         join_worker(&self.thread, SHUTDOWN_WAIT, "device manager");
     }
@@ -663,6 +709,31 @@ pub fn headset_status_text(detail: Option<&DeviceDetail>, language: Language) ->
         name.to_owned()
     } else {
         format!("{name}: {}", parts.join(" · "))
+    })
+}
+
+/// Tray status line for the keyboard: `K2 HE: profile 2` (English) or `K2 HE: profil 2`
+/// while connected (the number is the active HE profile, counted from 1), just `K2 HE`
+/// without HE data, `K2 HE: disconnected` / `K2 HE: rozłączona` while disconnected;
+/// `None` without a keyboard.
+pub fn keyboard_status_text(detail: Option<&DeviceDetail>, language: Language) -> Option<String> {
+    let detail = detail?;
+    let name = &detail.summary.name;
+    if detail.summary.connection == Connection::Disconnected {
+        return Some(match language {
+            Language::Pl => format!("{name}: rozłączona"),
+            _ => format!("{name}: disconnected"),
+        });
+    }
+    let profile = detail
+        .keyboard
+        .as_ref()
+        .and_then(|k| k.he.as_ref())
+        .map(|he| u16::from(he.current_profile) + 1);
+    Some(match (profile, language) {
+        (Some(n), Language::Pl) => format!("{name}: profil {n}"),
+        (Some(n), _) => format!("{name}: profile {n}"),
+        (None, _) => name.clone(),
     })
 }
 
@@ -3393,7 +3464,12 @@ mod tests {
     fn refresh_goes_to_the_worker_that_owns_the_id() {
         let (logitech, logitech_rx) = mpsc::channel();
         let (sony, sony_rx) = mpsc::channel();
-        let router = Router { logitech, sony };
+        let (keychron, keychron_rx) = mpsc::channel();
+        let router = Router {
+            logitech,
+            sony,
+            keychron,
+        };
         assert!(router.refresh(sony_wf_c710n::DEVICE_ID).is_some());
         assert!(matches!(
             sony_rx.try_recv(),
@@ -3406,13 +3482,26 @@ mod tests {
             Ok(Command::Refresh { id, .. }) if id == DEVICE_ID
         ));
         assert!(sony_rx.try_recv().is_err());
+        assert!(keychron_rx.try_recv().is_err());
+        assert!(router.refresh(keychron_k2he::DEVICE_ID).is_some());
+        assert!(matches!(
+            keychron_rx.try_recv(),
+            Ok(KeychronCommand::Refresh { .. })
+        ));
+        assert!(logitech_rx.try_recv().is_err());
+        assert!(sony_rx.try_recv().is_err());
     }
 
     #[test]
     fn unknown_id_reaches_no_worker() {
         let (logitech, logitech_rx) = mpsc::channel();
         let (sony, sony_rx) = mpsc::channel();
-        let router = Router { logitech, sony };
+        let (keychron, keychron_rx) = mpsc::channel();
+        let router = Router {
+            logitech,
+            sony,
+            keychron,
+        };
         assert!(router.refresh("nope").is_none());
         let code = |answer: Option<Receiver<Result<DeviceDetail, String>>>| {
             answer.unwrap().try_recv().unwrap().unwrap_err()
@@ -3431,13 +3520,19 @@ mod tests {
         assert_eq!(code(router.sony_write("nope", op)), "notSupported");
         assert!(logitech_rx.try_recv().is_err());
         assert!(sony_rx.try_recv().is_err());
+        assert!(keychron_rx.try_recv().is_err());
     }
 
     #[test]
     fn mouse_commands_with_the_headset_id_are_not_supported() {
         let (logitech, logitech_rx) = mpsc::channel();
         let (sony, sony_rx) = mpsc::channel();
-        let router = Router { logitech, sony };
+        let (keychron, keychron_rx) = mpsc::channel();
+        let router = Router {
+            logitech,
+            sony,
+            keychron,
+        };
         let id = sony_wf_c710n::DEVICE_ID;
         let answer = router.write(id, WriteOp::ReportRate(500)).unwrap();
         assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
@@ -3452,14 +3547,95 @@ mod tests {
         assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
         assert!(logitech_rx.try_recv().is_err());
         assert!(sony_rx.try_recv().is_err());
+        assert!(keychron_rx.try_recv().is_err());
         // A known id still reaches its worker.
         assert!(router.write(DEVICE_ID, WriteOp::Dpi(800)).is_some());
         assert!(matches!(logitech_rx.try_recv(), Ok(Command::Write { .. })));
     }
 
     #[test]
+    fn write_commands_with_the_keyboard_id_are_not_supported() {
+        let (logitech, logitech_rx) = mpsc::channel();
+        let (sony, sony_rx) = mpsc::channel();
+        let (keychron, keychron_rx) = mpsc::channel();
+        let router = Router {
+            logitech,
+            sony,
+            keychron,
+        };
+        let id = keychron_k2he::DEVICE_ID;
+        let answer = router.write(id, WriteOp::Dpi(800)).unwrap();
+        assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
+        let answer = router.mode(id, true).unwrap();
+        assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
+        let answer = router.save(id, SaveRequest::default()).unwrap();
+        assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
+        let answer = router
+            .sony_write(id, SonyWrite::eq_preset(1).unwrap())
+            .unwrap();
+        assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
+        assert!(logitech_rx.try_recv().is_err());
+        assert!(sony_rx.try_recv().is_err());
+        assert!(keychron_rx.try_recv().is_err());
+    }
+
+    fn keyboard_detail(connection: Connection, he: bool) -> DeviceDetail {
+        use myhub_core::{HeView, KeyboardView};
+        let mut detail = detail_for(connection, None);
+        detail.summary.id = keychron_k2he::DEVICE_ID.to_owned();
+        detail.summary.name = "K2 HE".to_owned();
+        detail.summary.kind = myhub_core::DeviceKind::Keyboard;
+        detail.headset = None;
+        detail.keyboard = Some(KeyboardView {
+            firmware: "v1.2.1".to_owned(),
+            via_protocol: 12,
+            layer_count: 4,
+            default_layer: None,
+            he: he.then(|| HeView {
+                current_profile: 1,
+                profiles: Vec::new(),
+                curve: None,
+            }),
+            lighting: None,
+            timers: None,
+            keymap: None,
+            other_configurator: false,
+        });
+        detail
+    }
+
+    #[test]
+    fn tray_line_for_the_keyboard_counts_the_profile_from_one() {
+        let line = |d: &DeviceDetail, l| keyboard_status_text(Some(d), l).unwrap();
+        let connected = keyboard_detail(Connection::Connected, true);
+        assert_eq!(line(&connected, Language::En), "K2 HE: profile 2");
+        assert_eq!(line(&connected, Language::Pl), "K2 HE: profil 2");
+        let no_he = keyboard_detail(Connection::Connected, false);
+        assert_eq!(line(&no_he, Language::En), "K2 HE");
+        let off = keyboard_detail(Connection::Disconnected, true);
+        assert_eq!(line(&off, Language::En), "K2 HE: disconnected");
+        assert_eq!(line(&off, Language::Pl), "K2 HE: rozłączona");
+        assert_eq!(keyboard_status_text(None, Language::En), None);
+        // Three devices fill the three tray rows, in slot order.
+        let mouse = detail_for(Connection::Connected, Some(55));
+        let mut headset = detail_for(Connection::Connected, Some(80));
+        headset.summary.name = "WF-C710N".to_owned();
+        let lines = tray_lines(
+            &[
+                (Slot::Logitech, mouse),
+                (Slot::Sony, headset),
+                (Slot::Keychron, connected),
+            ],
+            Language::En,
+        );
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2], "K2 HE: profile 2");
+    }
+
+    #[test]
     fn slots_are_in_list_order_with_their_ids() {
-        assert_eq!(Slot::ALL, [Slot::Logitech, Slot::Sony]);
+        assert_eq!(Slot::ALL, [Slot::Logitech, Slot::Sony, Slot::Keychron]);
+        assert_eq!(Slot::Keychron.id(), keychron_k2he::DEVICE_ID);
         assert_eq!(Slot::Logitech.id(), DEVICE_ID);
         assert_eq!(Slot::Sony.id(), sony_wf_c710n::DEVICE_ID);
         for slot in Slot::ALL {

@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 hidapi.workspace = true
 keychron-proto.workspace = true
+myhub-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
