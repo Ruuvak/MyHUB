@@ -1,11 +1,12 @@
 //! The session: one frame in flight, read retries, foreign traffic back-off.
 //!
 //! Every frame written comes from `Policy::check` -> `CheckedRequest::encode`. The
-//! policy is read-only: no write method exists in this slice, so the Volatile and
-//! Persistent gates are never opened. The session fills the runtime limits (profile
-//! count, buffer sizes, layers, LEDs, matrix) as the snapshot reads them. The link is
-//! private: nothing outside this crate can reach `RawLink::write_report` through a
-//! session.
+//! stored policy is read-only and stays so: a write opens exactly one extra tier on a
+//! copy for that one call (`request_with`, crate private; see `writes.rs`). A write is
+//! never resent, and two writes are at least [`WRITE_GAP`] apart.
+//! The session fills the runtime limits (profile count, buffer sizes, layers, LEDs,
+//! matrix) as the snapshot reads them. The link is private: nothing outside this crate
+//! can reach `RawLink::write_report` through a session.
 //!
 //! Foreign traffic rule: frames carry no sequence number, so a reply cannot be told
 //! from the launcher's reply to the same command. Any report that is not the reply to
@@ -46,6 +47,8 @@ pub const MIN_REPLY_TIMEOUT: Duration = Duration::from_millis(200);
 pub const READ_RETRIES: u32 = 2;
 /// Back-off after foreign traffic.
 pub const FOREIGN_BACKOFF: Duration = Duration::from_secs(5);
+/// Minimum time between two write-tier frames (Volatile or Persistent).
+pub const WRITE_GAP: Duration = Duration::from_millis(250);
 /// Most reports taken in one drain; more than this counts as foreign flooding.
 const MAX_DRAIN: usize = 64;
 
@@ -125,6 +128,19 @@ fn classify(frame: &Frame, pending: Option<&CheckedRequest>) -> Class {
 ///     let _ = s.link;
 /// }
 /// ```
+///
+/// ```compile_fail
+/// fn f(s: keychron_k2he::Session<keychron_k2he::HidapiLink>) {
+///     let _ = s.policy_with(keychron_proto::Tier::Volatile);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn f(mut s: keychron_k2he::Session<keychron_k2he::HidapiLink>) {
+///     let p = keychron_proto::Policy::allowing(keychron_proto::Tier::Volatile);
+///     let _ = s.request_with(&p, keychron_proto::Request::GetViaProtocol);
+/// }
+/// ```
 pub struct Session<L: RawLink> {
     link: L,
     policy: Policy,
@@ -140,6 +156,8 @@ pub struct Session<L: RawLink> {
     trace: Option<FrameTrace>,
     frames_sent: u32,
     matched: usize,
+    /// When the last write-tier frame went out.
+    last_write: Option<Instant>,
 }
 
 impl<L: RawLink> Session<L> {
@@ -157,6 +175,7 @@ impl<L: RawLink> Session<L> {
             trace: None,
             frames_sent: 0,
             matched: 1,
+            last_write: None,
         }
     }
 
@@ -198,21 +217,48 @@ impl<L: RawLink> Session<L> {
     }
 
     /// Fill runtime limits of the policy. The closure gets the current policy and
-    /// returns it with limits added; the gates stay closed by construction (the session
-    /// never calls `with_tier`).
+    /// returns it with limits added. The stored policy never gets a gate: `with_tier` is
+    /// only applied to a per-call copy by `policy_with`.
     pub(crate) fn set_limits(&mut self, f: impl FnOnce(Policy) -> Policy) {
         self.policy = f(self.policy);
+    }
+
+    /// The stored policy plus exactly `tier`, for one call. The stored policy itself is
+    /// not changed.
+    pub(crate) fn policy_with(&self, tier: Tier) -> Policy {
+        self.policy.with_tier(tier)
     }
 
     /// Check `request` against the policy and run it: drain, write, wait for the reply.
     /// A read is resent up to [`READ_RETRIES`] times after a timeout; nothing else is.
     pub fn request(&mut self, request: Request) -> Result<Frame, SessionError> {
-        let checked = self.policy.check(&request)?;
+        let policy = self.policy;
+        self.request_with(&policy, request)
+    }
+
+    /// [`Session::request`] against an explicit one-call policy. Same rules: one frame in
+    /// flight, drain and foreign checks, back-off, no resend for a non-Read tier. A
+    /// write-tier frame also waits until [`WRITE_GAP`] has passed since the last one; that
+    /// wait is not part of any reply timeout.
+    pub(crate) fn request_with(
+        &mut self,
+        policy: &Policy,
+        request: Request,
+    ) -> Result<Frame, SessionError> {
+        let checked = policy.check(&request)?;
         // Nothing is read while backing off, so the stale list stays as it is.
         if let Some(left) = self.backoff_remaining() {
             return Err(SessionError::BackingOff {
                 remaining_ms: u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
             });
+        }
+        if checked.tier() != Tier::Read
+            && let Some(last) = self.last_write
+        {
+            let wait = (last + WRITE_GAP).saturating_duration_since(Instant::now());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
         }
         let result = self.exchange(&checked);
         self.stale = std::mem::take(&mut self.next_stale);
@@ -258,6 +304,9 @@ impl<L: RawLink> Session<L> {
             trace(FrameDirection::Tx, &frame);
         }
         self.link.write_report(&report)?;
+        if checked.tier() != Tier::Read {
+            self.last_write = Some(Instant::now());
+        }
         self.frames_sent += 1;
         Ok(())
     }

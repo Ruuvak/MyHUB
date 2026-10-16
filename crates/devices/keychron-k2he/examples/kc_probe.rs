@@ -1,9 +1,11 @@
-//! Read-only probe for the Keychron K2 HE over USB raw HID.
+//! Probe for the Keychron K2 HE over USB raw HID. Read-only except `set profile`.
 //!
 //! Usage:
 //! `kc_probe list`
 //! `kc_probe state [--json] [--trace]`
 //! `kc_probe watch <seconds>`
+//! `kc_probe profile`
+//! `kc_probe set profile <1..3> [--save]`
 //!
 //! * `list`: the HID interfaces with the keyboard's VID and PID: interface number, usage
 //!   page, usage, product string, and how many of them match the raw HID rule (usage
@@ -16,10 +18,22 @@
 //! * `watch <seconds>`: opens the interface and only listens: it sends nothing. Prints
 //!   unsolicited reports (profile and effect changes) with timestamps, and the first
 //!   bytes of any other report (another program is talking to the keyboard).
+//! * `profile`: one A9 10 read; prints the current profile (1-based). No snapshot.
+//! * `set profile <n> [--save]`: makes profile n (1-based) the active HE profile (A9 11,
+//!   RAM), reads it back, prints before, after and whether it was saved. `--save` also
+//!   sends A9 1F, which WRITES FLASH. Nothing is sent when n is already current and
+//!   `--save` is absent.
 //!
-//! What it sends: only Read-tier requests that pass `keychron_proto::Policy::read_only()`
-//! (the session never opens another gate). It stops with an error and sends nothing more
-//! when it sees foreign traffic (the launcher is open); close the launcher first.
+//! WRITE COMMANDS REQUIRE EXPLICIT USER APPROVAL for each run. Never run `set` on your
+//! own. A timeout on a write means the state is unknown: run `profile` before anything
+//! else. Likewise after any other error that follows a write (ambiguous reply, foreign
+//! traffic, bad report, link error).
+//!
+//! What it sends: `list`, `state`, `watch` and `profile` send only Read-tier requests
+//! (the stored session policy is read-only). `set profile` also sends A9 11, and A9 1F
+//! with `--save`, each through a policy that opens only that tier for that call. It
+//! stops with an error and sends nothing more when it sees foreign traffic (the launcher
+//! is open); close the launcher first.
 //!
 //! Exit codes: 0 ok, 1 no keyboard found, 2 bad arguments, 3 failure.
 
@@ -28,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use keychron_k2he::{
     DISPLAY_NAME, FrameDirection, Incoming, Session, SessionError, Snapshot, list_interfaces,
-    read_snapshot,
+    read_profiles_info, read_snapshot, select_profile,
 };
 use keychron_proto::he::{KeyMode, KeyWord};
 
@@ -36,6 +50,8 @@ enum Command {
     List,
     State { json: bool, trace: bool },
     Watch(u64),
+    Profile,
+    SetProfile { profile: u8, save: bool },
 }
 
 fn parse_args() -> Option<Command> {
@@ -56,6 +72,25 @@ fn parse_args() -> Option<Command> {
         "watch" => {
             let seconds = args.next()?.parse().ok()?;
             args.next().is_none().then_some(Command::Watch(seconds))
+        }
+        "profile" => args.next().is_none().then_some(Command::Profile),
+        "set" => {
+            if args.next()?.as_str() != "profile" {
+                return None;
+            }
+            let number: u8 = args.next()?.parse().ok()?;
+            let save = match args.next().as_deref() {
+                None => false,
+                Some("--save") => true,
+                Some(_) => return None,
+            };
+            if !(1..=3).contains(&number) {
+                return None;
+            }
+            let profile = number - 1;
+            args.next()
+                .is_none()
+                .then_some(Command::SetProfile { profile, save })
         }
         _ => None,
     }
@@ -86,13 +121,17 @@ fn exit_for(e: &SessionError) -> ExitCode {
 
 fn main() -> ExitCode {
     let Some(command) = parse_args() else {
-        eprintln!("usage: kc_probe list | state [--json] [--trace] | watch <seconds>");
+        eprintln!(
+            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | set profile <1..3> [--save]"
+        );
         return ExitCode::from(2);
     };
     match command {
         Command::List => list(),
         Command::State { json, trace: t } => run(|s| state(s, json), t),
         Command::Watch(seconds) => run(|s| watch(s, seconds), false),
+        Command::Profile => run(current_profile, false),
+        Command::SetProfile { profile, save } => run(|s| set_profile(s, profile, save), false),
     }
 }
 
@@ -165,6 +204,37 @@ fn state(session: &mut Session<keychron_k2he::HidapiLink>, json: bool) -> Result
     } else {
         summary(&snapshot);
     }
+    Ok(())
+}
+
+fn current_profile(session: &mut Session<keychron_k2he::HidapiLink>) -> Result<(), SessionError> {
+    let info = read_profiles_info(session)?;
+    println!(
+        "current profile {} of {}",
+        u16::from(info.current) + 1,
+        info.count
+    );
+    Ok(())
+}
+
+fn set_profile(
+    session: &mut Session<keychron_k2he::HidapiLink>,
+    profile: u8,
+    save: bool,
+) -> Result<(), SessionError> {
+    let out = select_profile(session, profile, save)?;
+    println!(
+        "before {}, after {}, saved {}, frames written {}{}",
+        u16::from(out.before) + 1,
+        u16::from(out.after) + 1,
+        out.saved,
+        out.frames_written,
+        if out.unchanged {
+            " (already current, nothing written)"
+        } else {
+            ""
+        }
+    );
     Ok(())
 }
 

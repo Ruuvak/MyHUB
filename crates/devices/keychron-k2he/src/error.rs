@@ -44,4 +44,11 @@ pub enum SessionError {
     /// HE command version other than 4.
     #[error("HE command version {0} is not supported (only 4)")]
     UnsupportedHeVersion(u8),
+    /// The profile read back is not the one that was asked for. `saved` is true when
+    /// flash was already written (A9 1F acknowledged) before the mismatch.
+    #[error("profile read back is {got}, expected {expected} (flash written: {saved})")]
+    VerifyFailed { expected: u8, got: u8, saved: bool },
+    /// The keyboard answered a write with a nonzero status byte.
+    #[error("keyboard answered {command:#04x} {sub:#04x} with status {status}")]
+    DeviceStatus { command: u8, sub: u8, status: u8 },
 }

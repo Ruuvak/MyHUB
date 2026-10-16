@@ -1,9 +1,10 @@
-//! Keychron K2 HE driver over USB raw HID (read-only in this slice).
+//! Keychron K2 HE driver over USB raw HID (reads, plus profile select in `writes`).
 //!
 //! [`Session`] runs the `keychron-proto` protocol over any [`RawLink`]: one frame in
 //! flight, every frame from `Policy::check` -> `CheckedRequest::encode`, reads resent up
-//! to two times after a timeout, writes never resent. The policy is read-only; this
-//! crate has no write method yet. [`read_snapshot`] reads the whole keyboard state.
+//! to two times after a timeout, writes never resent. The stored policy is read-only; the
+//! only write is [`select_profile`], which opens one tier per call on a copy.
+//! [`read_snapshot`] reads the whole keyboard state.
 //!
 //! Another configurator (the Keychron launcher) talking to the keyboard at the same time
 //! cannot be told apart from our own replies, because frames carry no sequence number.
@@ -20,6 +21,7 @@ mod hid;
 mod link;
 mod session;
 mod snapshot;
+mod writes;
 
 pub use detail::to_detail;
 pub use discovery::{InterfaceInfo, list_interfaces};
@@ -28,12 +30,13 @@ pub use hid::HidapiLink;
 pub use link::{FRAME_LEN, LinkError, READ_BUF_LEN, REPORT_LEN, RawLink};
 pub use session::{
     Event, FOREIGN_BACKOFF, FrameDirection, FrameTrace, Incoming, MIN_REPLY_TIMEOUT, READ_RETRIES,
-    REPLY_TIMEOUT, Session,
+    REPLY_TIMEOUT, Session, WRITE_GAP,
 };
 pub use snapshot::{
     LightSettings, Lighting, RegionSlots, SectionNote, Snapshot, VIA_PROTOCOL, read_snapshot,
     refresh_state,
 };
+pub use writes::{SelectOutcome, read_profiles_info, select_profile};
 
 /// Stable device ID used by the UI and the app's per-device files.
 pub const DEVICE_ID: &str = "keychron-k2he";
