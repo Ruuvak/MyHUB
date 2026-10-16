@@ -1,9 +1,11 @@
 import { Clock, Keyboard, Lightbulb, Sliders } from "@phosphor-icons/react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ReadOnlyNote } from "../../components/device/ReadOnlyNote";
 import { useUpdatedAgo } from "../../components/device/useUpdatedAgo";
 import { useT } from "../../i18n/useT";
+import { errorCode, keyboardErrorMessage } from "../../lib/deviceErrors";
 import { cx } from "../../lib/cx";
+import { refreshDevice, setKeyboardProfile } from "../../lib/ipc";
 import {
   brightnessPercent,
   effectKey,
@@ -24,7 +26,7 @@ import { useKeyboardRefresh } from "./useKeyboardRefresh";
 const MATRIX_ROWS = 6;
 const MATRIX_COLS = 16;
 
-/** Keyboard view (Keychron K2 HE), read only: info, HE profiles, lighting, timers and the keymap. Re-reads the keyboard once when shown. */
+/** Keyboard view (Keychron K2 HE): info, HE profiles (selectable over USB with writes on), lighting, timers and the keymap. Re-reads the keyboard once when shown. */
 export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDetail: (next: DeviceDetail) => void }) {
   const t = useT();
   useKeyboardRefresh(detail.id, onDetail);
@@ -50,7 +52,7 @@ export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDe
           </div>
         </Panel>
 
-        {keyboard.he ? <HeCard keyboard={keyboard} /> : null}
+        {keyboard.he ? <HeCard detail={detail} keyboard={keyboard} onDetail={onDetail} /> : null}
         {keyboard.lighting ? <LightingCard lighting={keyboard.lighting} /> : null}
         {keyboard.timers ? <TimersCard timers={keyboard.timers} /> : null}
         {keyboard.keymap && keyboard.keymap.length > 0 ? <KeymapCard keyboard={keyboard} keymap={keyboard.keymap} /> : null}
@@ -91,24 +93,95 @@ function InfoRow({ label, value, mono }: { label: string; value: ReactNode; mono
   );
 }
 
-function HeCard({ keyboard }: { keyboard: KeyboardView }) {
+function HeCard({ detail, keyboard, onDetail }: { detail: DeviceDetail; keyboard: KeyboardView; onDetail: (next: DeviceDetail) => void }) {
   const t = useT();
   const he = keyboard.he;
+  const [pending, setPending] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   if (!he) return null;
+  const selectable = !detail.readOnly && keyboard.configurable && !keyboard.otherConfigurator;
+  // Writes are off but the keyboard could be configured: say what to turn on.
+  const needsWrites = detail.readOnly && keyboard.configurable;
+
+  const select = (index: number) => {
+    if (pending !== null || index === he.currentProfile) return;
+    setPending(index);
+    setError(null);
+    setKeyboardProfile(detail.id, index).then(
+      (next) => {
+        if (!alive.current) return;
+        setPending(null);
+        onDetail(next);
+      },
+      (e: unknown) => {
+        if (!alive.current) return;
+        setPending(null);
+        const { key, vars } = keyboardErrorMessage(e);
+        setError(t(key, vars));
+        // The state is unknown after a timeout: show what the keyboard has now.
+        if (errorCode(e) === "deviceError:timeout") {
+          refreshDevice(detail.id).then(
+            (next) => {
+              if (next && alive.current) onDetail(next);
+            },
+            () => {},
+          );
+        }
+      },
+    );
+  };
+
   return (
     <Panel title={t("keyboard.he.title")} icon={<Sliders size={18} weight="regular" aria-hidden="true" />}>
       <ul className="flex flex-col gap-2 px-4 pt-2 pb-4">
         {he.profiles.map((profile) => (
           <li key={profile.index}>
-            <ProfileRow profile={profile} active={profile.index === he.currentProfile} />
+            <ProfileRow
+              profile={profile}
+              active={profile.index === he.currentProfile}
+              onSelect={selectable ? () => select(profile.index) : undefined}
+              pending={pending === profile.index}
+              locked={pending !== null}
+            />
           </li>
         ))}
+        {error ? (
+          <li role="alert" className="text-sm text-danger">
+            {error}
+          </li>
+        ) : null}
+        {needsWrites ? (
+          <li>
+            <ReadOnlyNote icon="info" text={t("keyboard.he.needsWrites")} />
+          </li>
+        ) : null}
       </ul>
     </Panel>
   );
 }
 
-function ProfileRow({ profile, active }: { profile: HeProfileView; active: boolean }) {
+function ProfileRow({
+  profile,
+  active,
+  onSelect,
+  pending = false,
+  locked = false,
+}: {
+  profile: HeProfileView;
+  active: boolean;
+  /** Set when the card is a button (writes allowed, keyboard configurable). */
+  onSelect?: () => void;
+  pending?: boolean;
+  /** A switch is running: every card is disabled. */
+  locked?: boolean;
+}) {
   const t = useT();
   const counts: Array<{ label: string; value: number }> = [
     { label: t("keyboard.he.perKey"), value: profile.perKeyOverrides },
@@ -117,18 +190,14 @@ function ProfileRow({ profile, active }: { profile: HeProfileView; active: boole
     { label: t("keyboard.he.analog"), value: profile.analogKeys },
   ].filter((c) => c.value > 0);
   const rapid = profile.mode === "rapidTrigger";
+  const name = profileDisplayName(profile, t);
 
-  return (
-    <div
-      aria-current={active ? "true" : undefined}
-      className={cx(
-        "rounded-control border px-3 py-2.5",
-        active ? "border-accent/60 bg-accent/10" : "border-border bg-surface-2",
-      )}
-    >
+  const body = (
+    <>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="min-w-0 truncate text-base font-medium text-text">{profileDisplayName(profile, t)}</span>
+        <span className="min-w-0 truncate text-base font-medium text-text">{name}</span>
         {active ? <Badge tone="accent">{t("keyboard.he.active")}</Badge> : null}
+        {pending ? <Badge>{t("keyboard.he.switching")}</Badge> : null}
         <span className="ml-auto text-sm text-text-muted">{t(heModeKey(profile.mode))}</span>
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-sm text-text-muted">
@@ -145,7 +214,34 @@ function ProfileRow({ profile, active }: { profile: HeProfileView; active: boole
           ))}
         </div>
       ) : null}
-    </div>
+    </>
+  );
+  const frame = cx("rounded-control border px-3 py-2.5", active ? "border-accent/60 bg-accent/10" : "border-border bg-surface-2");
+
+  if (!onSelect) {
+    return (
+      <div aria-current={active ? "true" : undefined} className={frame}>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      aria-current={active ? "true" : undefined}
+      aria-busy={pending || undefined}
+      aria-label={active ? undefined : t("keyboard.he.select", { name })}
+      disabled={locked || pending}
+      onClick={onSelect}
+      className={cx(
+        frame,
+        "t-colors block w-full text-left disabled:opacity-60",
+        !active && !locked && "hover-fine:border-accent/40",
+        pending && "opacity-80",
+      )}
+    >
+      {body}
+    </button>
   );
 }
 

@@ -38,7 +38,8 @@ use std::time::{Duration, Instant};
 use keychron_k2he::{
     DEVICE_ID, Incoming, KeyboardCache, LinkSnapshot, RawLink, Session, SessionError, Snapshot,
     cache_of, cache_path, list_interfaces, list_receiver_interfaces, read_link, read_link_state,
-    read_snapshot, refresh_state, to_detail, to_receiver_detail,
+    read_profiles_info, read_snapshot, refresh_state, select_profile, to_detail,
+    to_receiver_detail,
 };
 use myhub_core::{Connection, DeviceDetail};
 use tauri::Manager;
@@ -64,10 +65,82 @@ pub enum KeychronCommand {
     /// Re-read the profile and lighting values and answer with the new detail (the
     /// cached one while another program talks to the keyboard).
     Refresh { reply: Sender<Option<DeviceDetail>> },
+    /// Make `profile` (0-based, as sent by the UI) the active HE profile. Only over USB;
+    /// A9 11 and its A9 10 check, never A9 1F. The answer is the new detail or a
+    /// contract error code.
+    SelectProfile {
+        profile: i64,
+        /// The caller's give-up instant minus a margin; a write starts only with
+        /// [`MIN_WRITE_BUDGET`] left.
+        deadline: Instant,
+        reply: Sender<Result<DeviceDetail, String>>,
+    },
     /// The settings changed: publish the detail again (`readOnly` may flip).
     SettingsChanged,
     /// Wakes the worker (shutdown).
     Wake,
+}
+
+/// How long the caller waits for a profile selection. The worker deadline is this minus the
+/// 2 s margin.
+pub const KEYBOARD_WRITE_WAIT: Duration = Duration::from_secs(15);
+
+/// A write starts only when at least this much of the deadline is left. Worst case is about
+/// 10 s: A9 10 (1 s, resent twice), A9 11 (1 s, never resent), verify A9 10 (3 x 1 s) and
+/// the re-read A9 10 (3 x 1 s).
+const MIN_WRITE_BUDGET: Duration = Duration::from_secs(11);
+
+/// A queued profile selection.
+struct PendingSelect {
+    profile: i64,
+    deadline: Instant,
+    reply: Sender<Result<DeviceDetail, String>>,
+}
+
+/// What a profile selection did to the keyboard state.
+struct SelectResult {
+    /// `Ok` or the contract error code.
+    answer: Result<(), String>,
+    /// The cached snapshot or the foreign flag changed.
+    changed: bool,
+    /// The link is gone (reason).
+    lost: Option<String>,
+}
+
+impl SelectResult {
+    fn refused(code: &str) -> Self {
+        Self {
+            answer: Err(code.to_owned()),
+            changed: false,
+            lost: None,
+        }
+    }
+}
+
+/// The error code of a write that cannot reach a USB session: writes off first, then a
+/// receiver that links the keyboard (`usbRequired`), otherwise `disconnected`.
+fn no_usb_refusal(writes_allowed: bool, receiver_linked: bool) -> &'static str {
+    if !writes_allowed {
+        "writesDisabled"
+    } else if receiver_linked {
+        "usbRequired"
+    } else {
+        "disconnected"
+    }
+}
+
+/// The `<kind>` of `deviceError:<kind>` for a session error.
+fn error_kind(error: &SessionError) -> &'static str {
+    match error {
+        SessionError::Timeout => "timeout",
+        SessionError::AmbiguousReply => "ambiguous",
+        SessionError::BadReport(_) => "badReport",
+        SessionError::Link(_) => "link",
+        SessionError::Policy(_) => "policy",
+        SessionError::Decode(_) => "decode",
+        SessionError::DeviceStatus { .. } => "status",
+        _ => "session",
+    }
 }
 
 /// An open session with its cached snapshot and the foreign traffic state. Generic over
@@ -124,6 +197,82 @@ impl<L: RawLink> Keyboard<L> {
                 Ok(false)
             }
         }
+    }
+
+    /// Select the HE profile `profile` (0-based). Preconditions, before any frame:
+    /// writes allowed, no other configurator, `profile` below the profile count, enough
+    /// budget. Runs `select_profile(.., save = false)`: A9 11 only, never A9 1F, no retry.
+    /// A failure after a frame may have gone out re-reads A9 10 here, so the snapshot is
+    /// known again before anything else is served.
+    fn select_profile(
+        &mut self,
+        writes_allowed: bool,
+        profile: i64,
+        deadline: Instant,
+        now: Instant,
+    ) -> SelectResult {
+        if !writes_allowed {
+            return SelectResult::refused("writesDisabled");
+        }
+        if self.other_configurator() {
+            return SelectResult::refused("busy");
+        }
+        let count = i64::from(self.snapshot.profiles_info.count);
+        let Some(index) = u8::try_from(profile).ok().filter(|p| i64::from(*p) < count) else {
+            return SelectResult::refused("outOfRange");
+        };
+        if deadline.saturating_duration_since(now) < MIN_WRITE_BUDGET {
+            return SelectResult::refused("deviceError:budget");
+        }
+        let mut result = SelectResult {
+            answer: Ok(()),
+            changed: false,
+            lost: None,
+        };
+        match select_profile(&mut self.session, index, false) {
+            Ok(outcome) => {
+                result.changed = self.patch_profile(outcome.after);
+            }
+            Err(SessionError::VerifyFailed { got, .. }) => {
+                // The keyboard told us what it is on now.
+                result.changed = self.patch_profile(got);
+                result.answer = Err("verifyFailed".to_owned());
+            }
+            Err(
+                SessionError::ForeignTraffic
+                | SessionError::BackingOff { .. }
+                | SessionError::BadReport(_),
+            ) => {
+                result.changed = self.mark_foreign(now);
+                result.answer = Err("busy".to_owned());
+            }
+            Err(error @ SessionError::Link(_)) => {
+                result.answer = Err(format!("deviceError:{}", error_kind(&error)));
+                result.lost = Some(error.to_string());
+            }
+            Err(error) => {
+                result.answer = Err(format!("deviceError:{}", error_kind(&error)));
+                // No frame went out for a policy refusal; anything else may have
+                // changed the profile, so read it again.
+                if !matches!(error, SessionError::Policy(_)) {
+                    match read_profiles_info(&mut self.session) {
+                        Ok(info) => result.changed = self.patch_profile(info.current),
+                        Err(e) => match self.failed(&e, now) {
+                            Ok(flipped) => result.changed = flipped,
+                            Err(reason) => result.lost = Some(reason),
+                        },
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Sets the cached current profile; `true` when it changed.
+    fn patch_profile(&mut self, current: u8) -> bool {
+        let changed = self.snapshot.profiles_info.current != current;
+        self.snapshot.profiles_info.current = current;
+        changed
     }
 
     /// One pass of the serving loop: the light refresh if asked (and nobody else is
@@ -430,12 +579,26 @@ impl KeychronWorker {
         while !self.stopping() {
             let mut replies = Vec::new();
             let mut dirty = false;
+            let mut selects = Vec::new();
             while let Ok(command) = self.commands.try_recv() {
                 match command {
                     KeychronCommand::Refresh { reply } => replies.push(reply),
+                    KeychronCommand::SelectProfile {
+                        profile,
+                        deadline,
+                        reply,
+                    } => selects.push(PendingSelect {
+                        profile,
+                        deadline,
+                        reply,
+                    }),
                     KeychronCommand::SettingsChanged => dirty = true,
                     KeychronCommand::Wake => {}
                 }
+            }
+            if let Err(reason) = self.run_selects(keyboard, stamp, cache, selects) {
+                answer_all(replies, Some(self.stamped(keyboard, false, *stamp)));
+                return Outcome::Lost(reason);
             }
             let now = Instant::now();
             match keyboard.step(now, !replies.is_empty(), POLL) {
@@ -470,6 +633,37 @@ impl KeychronWorker {
             }
         }
         Outcome::Stopped
+    }
+
+    /// Runs the queued profile selections one after the other. `allowDeviceWrites` is
+    /// read once per command. A change is cached, stored and published before the
+    /// answer goes out. `Err` with the reason when the link is gone: the command that
+    /// met it gets its error code, the ones behind it `disconnected`.
+    fn run_selects(
+        &self,
+        keyboard: &mut Keyboard<keychron_k2he::HidapiLink>,
+        stamp: &mut u64,
+        cache: &mut Option<KeyboardCache>,
+        selects: Vec<PendingSelect>,
+    ) -> Result<(), String> {
+        drain_selects(
+            keyboard,
+            selects,
+            || self.writes_allowed(),
+            |keyboard, changed, publish| {
+                if changed {
+                    *stamp = clock_ms();
+                    if !keyboard.other_configurator() {
+                        self.store_cache(cache, &keyboard.snapshot);
+                    }
+                }
+                let detail = self.stamped(keyboard, true, *stamp);
+                if publish {
+                    self.publish(detail.clone(), true);
+                }
+                detail
+            },
+        )
     }
 
     /// The keyboard through the receiver: opens the receiver session, reads B1..B3 once
@@ -515,6 +709,10 @@ impl KeychronWorker {
             while let Ok(command) = self.commands.try_recv() {
                 match command {
                     KeychronCommand::Refresh { reply } => replies.push(reply),
+                    KeychronCommand::SelectProfile { reply, .. } => {
+                        let code = no_usb_refusal(self.writes_allowed(), link.linked);
+                        let _ = reply.send(Err(code.to_owned()));
+                    }
                     KeychronCommand::SettingsChanged => dirty = true,
                     KeychronCommand::Wake => {}
                 }
@@ -651,6 +849,10 @@ impl KeychronWorker {
                     let cached = lock(&self.state).find(DEVICE_ID);
                     let _ = reply.send(cached);
                 }
+                Ok(KeychronCommand::SelectProfile { reply, .. }) => {
+                    let code = no_usb_refusal(self.writes_allowed(), false);
+                    let _ = reply.send(Err(code.to_owned()));
+                }
                 // Disconnected: readOnly is already true.
                 Ok(KeychronCommand::SettingsChanged | KeychronCommand::Wake)
                 | Err(RecvTimeoutError::Timeout) => {}
@@ -659,6 +861,43 @@ impl KeychronWorker {
             }
         }
     }
+}
+
+/// Runs the queued selections one after the other. `writes_allowed` is asked once per
+/// command. `settle(keyboard, changed, publish)` is called after each command (stamp,
+/// cache, and publish when asked) and returns the detail to answer with; it is called
+/// before the answer is sent, and for a command that ended the link only when something
+/// changed (without publishing). `Err` with the reason when the link is gone: that
+/// command gets its error code, the ones behind it `disconnected`.
+fn drain_selects<L: RawLink>(
+    keyboard: &mut Keyboard<L>,
+    selects: Vec<PendingSelect>,
+    mut writes_allowed: impl FnMut() -> bool,
+    mut settle: impl FnMut(&Keyboard<L>, bool, bool) -> DeviceDetail,
+) -> Result<(), String> {
+    let mut selects = selects.into_iter();
+    while let Some(select) = selects.next() {
+        let result = keyboard.select_profile(
+            writes_allowed(),
+            select.profile,
+            select.deadline,
+            Instant::now(),
+        );
+        if let Some(reason) = result.lost {
+            if result.changed {
+                settle(keyboard, true, false);
+            }
+            let code = result.answer.err().unwrap_or_default();
+            let _ = select.reply.send(Err(code));
+            for rest in selects {
+                let _ = rest.reply.send(Err("disconnected".to_owned()));
+            }
+            return Err(reason);
+        }
+        let detail = settle(keyboard, result.changed, result.changed);
+        let _ = select.reply.send(result.answer.map(|()| detail));
+    }
+    Ok(())
 }
 
 fn answer_all(replies: Vec<Sender<Option<DeviceDetail>>>, detail: Option<DeviceDetail>) {
@@ -672,6 +911,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
+    use std::sync::mpsc;
 
     use keychron_k2he::{LinkError, READ_BUF_LEN, REPORT_LEN};
     use keychron_proto::he::{HeInfo, ProfilesInfo};
@@ -687,6 +927,23 @@ mod tests {
         sent: Vec<u8>,
         /// The reply to a B2 request; other requests are never answered.
         b2: Option<Vec<u8>>,
+        /// Command, sub and first argument of every report written.
+        frames: Vec<[u8; 3]>,
+        /// A keyboard that answers A9 10 and A9 11 when set.
+        he: Option<He>,
+        /// The write that fails with a link error (1-based count of reports written).
+        fail_write_at: Option<usize>,
+    }
+
+    /// A keyboard's HE profile state for the select tests.
+    struct He {
+        current: u8,
+        /// A9 11 gets no reply and changes nothing.
+        mute_select: bool,
+        /// A9 11 is answered but the profile does not change.
+        stuck: bool,
+        /// A9 11 is answered by a report that is not its reply (another program).
+        foreign_select: bool,
     }
 
     /// A link that holds what the test queued and counts the reports written; it
@@ -697,7 +954,30 @@ mod tests {
         fn write_report(&mut self, report: &[u8; REPORT_LEN]) -> Result<(), LinkError> {
             let mut shared = self.0.borrow_mut();
             shared.written += 1;
+            if shared.fail_write_at == Some(shared.written) {
+                return Err(LinkError::Hid("unplugged".to_owned()));
+            }
             shared.sent.push(report[1]);
+            shared.frames.push([report[1], report[2], report[3]]);
+            if report[1] == 0xA9
+                && let Some(he) = shared.he.as_mut()
+            {
+                let reply = match report[2] {
+                    0x10 => Some(vec![0xA9, 0x10, he.current, 3, 0x5C, 0x03, 20, 20]),
+                    0x11 if he.foreign_select => Some(vec![0x55; 32]),
+                    0x11 if !he.mute_select => {
+                        if !he.stuck {
+                            he.current = report[3];
+                        }
+                        Some(vec![0xA9, 0x11, 0, report[3]])
+                    }
+                    _ => None,
+                };
+                if let Some(mut reply) = reply {
+                    reply.resize(32, 0);
+                    shared.inbox.push_back(reply);
+                }
+            }
             if report[1] == 0xB2
                 && let Some(reply) = shared.b2.clone()
             {
@@ -906,5 +1186,194 @@ mod tests {
         assert!(!up.keyboard.unwrap().configurable);
         let down = rx.detail(None, false);
         assert_eq!(down.summary.connection, Connection::Disconnected);
+    }
+
+    const SELECT_BUDGET: Duration = Duration::from_secs(13);
+
+    /// A keyboard on profile 1 (0-based) that answers A9 10 and A9 11.
+    fn he_keyboard(mute_select: bool, stuck: bool) -> (Keyboard<Mock>, Rc<RefCell<Shared>>) {
+        let (kb, shared) = keyboard();
+        shared.borrow_mut().he = Some(He {
+            current: 1,
+            mute_select,
+            stuck,
+            foreign_select: false,
+        });
+        (kb, shared)
+    }
+
+    fn select(kb: &mut Keyboard<Mock>, writes: bool, profile: i64) -> SelectResult {
+        let now = Instant::now();
+        kb.select_profile(writes, profile, now + SELECT_BUDGET, now)
+    }
+
+    #[test]
+    fn select_preconditions_refuse_before_any_frame() {
+        let (mut kb, shared) = he_keyboard(false, false);
+        let err = |r: SelectResult| r.answer.unwrap_err();
+        assert_eq!(err(select(&mut kb, false, 2)), "writesDisabled");
+        assert_eq!(err(select(&mut kb, true, 3)), "outOfRange");
+        assert_eq!(err(select(&mut kb, true, -1)), "outOfRange");
+        let now = Instant::now();
+        let late = kb.select_profile(true, 2, now + Duration::from_secs(10), now);
+        assert_eq!(err(late), "deviceError:budget");
+        kb.mark_foreign(now);
+        assert_eq!(err(select(&mut kb, true, 2)), "busy");
+        // Writes off outranks busy.
+        assert_eq!(err(select(&mut kb, false, 2)), "writesDisabled");
+        assert_eq!(shared.borrow().written, 0);
+    }
+
+    #[test]
+    fn no_usb_refusal_orders_writes_off_then_receiver_then_disconnected() {
+        // Pure function: the receiver loop and `wait()` only call it and send no frame.
+        assert_eq!(no_usb_refusal(true, true), "usbRequired");
+        assert_eq!(no_usb_refusal(false, true), "writesDisabled");
+        assert_eq!(no_usb_refusal(false, false), "writesDisabled");
+        assert_eq!(no_usb_refusal(true, false), "disconnected");
+    }
+
+    #[test]
+    fn select_sends_a9_10_a9_11_a9_10_and_shows_the_new_profile() {
+        let (mut kb, shared) = he_keyboard(false, false);
+        let result = select(&mut kb, true, 2);
+        assert!(result.answer.is_ok() && result.changed && result.lost.is_none());
+        assert_eq!(
+            shared.borrow().frames,
+            vec![[0xA9, 0x10, 0], [0xA9, 0x11, 2], [0xA9, 0x10, 0]]
+        );
+        let he = kb.detail(true).keyboard.unwrap().he.unwrap();
+        assert_eq!(he.current_profile, 2);
+        // The profile is already current: nothing is written.
+        let again = select(&mut kb, true, 2);
+        assert!(again.answer.is_ok() && !again.changed);
+        assert_eq!(shared.borrow().frames.len(), 4);
+    }
+
+    #[test]
+    fn select_reports_verify_failed_with_the_profile_the_keyboard_has() {
+        let (mut kb, shared) = he_keyboard(false, true);
+        let result = select(&mut kb, true, 2);
+        assert_eq!(result.answer.unwrap_err(), "verifyFailed");
+        assert_eq!(
+            kb.detail(true)
+                .keyboard
+                .unwrap()
+                .he
+                .unwrap()
+                .current_profile,
+            1
+        );
+        assert_eq!(shared.borrow().frames.len(), 3);
+    }
+
+    #[test]
+    fn select_timeout_rereads_once_and_never_resends_a9_11() {
+        let (mut kb, shared) = he_keyboard(true, false);
+        let result = select(&mut kb, true, 2);
+        assert_eq!(result.answer.unwrap_err(), "deviceError:timeout");
+        assert!(result.lost.is_none());
+        assert_eq!(
+            shared.borrow().frames,
+            vec![[0xA9, 0x10, 0], [0xA9, 0x11, 2], [0xA9, 0x10, 0]]
+        );
+        assert_eq!(
+            kb.detail(true)
+                .keyboard
+                .unwrap()
+                .he
+                .unwrap()
+                .current_profile,
+            1
+        );
+    }
+
+    fn pending(profile: i64) -> (PendingSelect, mpsc::Receiver<Result<DeviceDetail, String>>) {
+        let (reply, answer) = mpsc::channel();
+        let deadline = Instant::now() + SELECT_BUDGET;
+        (
+            PendingSelect {
+                profile,
+                deadline,
+                reply,
+            },
+            answer,
+        )
+    }
+
+    fn settle_detail(kb: &Keyboard<Mock>) -> DeviceDetail {
+        kb.detail(true)
+    }
+
+    #[test]
+    fn a_foreign_report_during_select_answers_busy_without_a_re_read() {
+        let (mut kb, shared) = he_keyboard(false, false);
+        shared.borrow_mut().he.as_mut().unwrap().foreign_select = true;
+        let result = select(&mut kb, true, 2);
+        assert_eq!(result.answer.unwrap_err(), "busy");
+        assert!(result.lost.is_none());
+        assert!(kb.other_configurator());
+        // A9 10, A9 11 and nothing after.
+        assert_eq!(
+            shared.borrow().frames,
+            vec![[0xA9, 0x10, 0], [0xA9, 0x11, 2]]
+        );
+    }
+
+    #[test]
+    fn link_loss_mid_select_answers_its_code_and_the_queued_ones_disconnected() {
+        let (mut kb, shared) = he_keyboard(false, false);
+        // The second report written (A9 11) fails.
+        shared.borrow_mut().fail_write_at = Some(2);
+        let (first, first_rx) = pending(2);
+        let (second, second_rx) = pending(0);
+        let result = drain_selects(
+            &mut kb,
+            vec![first, second],
+            || true,
+            |kb, _, _| settle_detail(kb),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            first_rx.try_recv().unwrap().unwrap_err(),
+            "deviceError:link"
+        );
+        assert_eq!(second_rx.try_recv().unwrap().unwrap_err(), "disconnected");
+        // A9 10, the failed A9 11, no re-read.
+        assert_eq!(shared.borrow().written, 2);
+    }
+
+    #[test]
+    fn publish_comes_before_the_answer_and_writes_are_checked_per_command() {
+        let (mut kb, shared) = he_keyboard(false, false);
+        let (first, first_rx) = pending(2);
+        let (second, second_rx) = pending(0);
+        let published = RefCell::new(Vec::new());
+        let asked = RefCell::new(0);
+        let result = drain_selects(
+            &mut kb,
+            vec![first, second],
+            || {
+                // The setting flips between the two commands.
+                *asked.borrow_mut() += 1;
+                *asked.borrow() == 1
+            },
+            |kb, changed, publish| {
+                if publish {
+                    // Nobody has been answered yet.
+                    assert!(first_rx.try_recv().is_err());
+                    published.borrow_mut().push(changed);
+                }
+                settle_detail(kb)
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(*published.borrow(), vec![true]);
+        let detail = first_rx.try_recv().unwrap().unwrap();
+        assert_eq!(detail.keyboard.unwrap().he.unwrap().current_profile, 2);
+        assert_eq!(second_rx.try_recv().unwrap().unwrap_err(), "writesDisabled");
+        // Only the first command sent frames: A9 10, A9 11, A9 10.
+        assert_eq!(shared.borrow().written, 3);
+        assert_eq!(*asked.borrow(), 2);
     }
 }

@@ -45,7 +45,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backup;
-use crate::keychron::{KeychronCommand, KeychronWorker};
+use crate::keychron::{KEYBOARD_WRITE_WAIT, KeychronCommand, KeychronWorker};
 use crate::settings::{self, Language, Settings, SettingsState};
 use crate::sony::{SONY_WRITE_WAIT, SonyCommand, SonyWorker, SonyWrite};
 use crate::tray;
@@ -306,6 +306,28 @@ impl Router {
             .send(SonyCommand::Write {
                 op,
                 deadline: Instant::now() + SONY_WRITE_WAIT.saturating_sub(WRITE_DEADLINE_MARGIN),
+                reply,
+            })
+            .ok()
+            .map(|()| answer)
+    }
+
+    /// A keyboard profile selection: only the keyboard id reaches the keyboard worker,
+    /// every other id answers `notSupported`.
+    fn keyboard_profile(
+        &self,
+        id: &str,
+        profile: i64,
+    ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        if route_of(id) != Some(Slot::Keychron) {
+            return Some(refused_reply("notSupported"));
+        }
+        let (reply, answer) = mpsc::channel();
+        self.keychron
+            .send(KeychronCommand::SelectProfile {
+                profile,
+                deadline: Instant::now()
+                    + KEYBOARD_WRITE_WAIT.saturating_sub(WRITE_DEADLINE_MARGIN),
                 reply,
             })
             .ok()
@@ -577,6 +599,16 @@ impl DeviceManager {
         op: SonyWrite,
     ) -> Option<Receiver<Result<DeviceDetail, String>>> {
         self.router.sony_write(id, op)
+    }
+
+    /// Asks the keyboard worker to make `profile` (0-based) the active HE profile. Any
+    /// other id answers `notSupported`; `None` when the worker is gone.
+    pub fn request_keyboard_profile(
+        &self,
+        id: &str,
+        profile: i64,
+    ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        self.router.keyboard_profile(id, profile)
     }
 
     /// Tells the workers that the settings changed, so they publish the detail
@@ -3588,6 +3620,34 @@ mod tests {
         assert!(logitech_rx.try_recv().is_err());
         assert!(sony_rx.try_recv().is_err());
         assert!(keychron_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn keyboard_profile_reaches_only_the_keyboard_worker() {
+        let (logitech, logitech_rx) = mpsc::channel();
+        let (sony, sony_rx) = mpsc::channel();
+        let (keychron, keychron_rx) = mpsc::channel();
+        let router = Router {
+            logitech,
+            sony,
+            keychron,
+        };
+        for id in [DEVICE_ID, sony_wf_c710n::DEVICE_ID, "nope"] {
+            let answer = router.keyboard_profile(id, 1).unwrap();
+            assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
+        }
+        assert!(logitech_rx.try_recv().is_err());
+        assert!(sony_rx.try_recv().is_err());
+        assert!(keychron_rx.try_recv().is_err());
+        assert!(
+            router
+                .keyboard_profile(keychron_k2he::DEVICE_ID, 2)
+                .is_some()
+        );
+        assert!(matches!(
+            keychron_rx.try_recv(),
+            Ok(KeychronCommand::SelectProfile { profile: 2, .. })
+        ));
     }
 
     fn keyboard_detail(connection: Connection, he: bool) -> DeviceDetail {

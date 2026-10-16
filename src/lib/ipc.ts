@@ -114,6 +114,9 @@ function withPreviewSaved(detail: DeviceDetail): DeviceDetail {
 // Dev preview only: headset values "written" through the setNcAsm, setEq* and setHeadsetToggle wrappers.
 let previewHeadset: Partial<HeadsetView> = {};
 
+// Dev preview only: HE profile "selected" through setKeyboardProfile (0-based).
+let previewKeyboardProfile: number | null = null;
+
 /** Dev preview only: the fixture with applied values and a readOnly flag derived like the backend does. */
 async function previewDetail(id: string): Promise<DeviceDetail | null> {
   if (!previewDemo()) return null;
@@ -123,8 +126,12 @@ async function previewDetail(id: string): Promise<DeviceDetail | null> {
   return {
     ...detail,
     headset: detail.headset && { ...detail.headset, ...previewHeadset },
-    // Dev only: `&writes=1` makes a headset fixture writable without turning the setting on.
-    readOnly: !((previewSettings.allowDeviceWrites || (detail.headset && new URLSearchParams(window.location.search).get("writes") === "1")) && connected),
+    keyboard:
+      detail.keyboard?.he && previewKeyboardProfile !== null
+        ? { ...detail.keyboard, he: { ...detail.keyboard.he, currentProfile: previewKeyboardProfile } }
+        : detail.keyboard,
+    // Dev only: `&writes=1` makes a headset or keyboard fixture writable without turning the setting on.
+    readOnly: !((previewSettings.allowDeviceWrites || ((detail.headset || detail.keyboard) && new URLSearchParams(window.location.search).get("writes") === "1")) && connected),
     dpi: detail.dpi && { ...detail.dpi, current: previewApplied.dpi ?? detail.dpi.current },
     reportRate: detail.reportRate && { ...detail.reportRate, currentHz: previewApplied.reportRateHz ?? detail.reportRate.currentHz },
     onboard: detail.onboard && previewApplied.host ? { ...detail.onboard, mode: "host" } : detail.onboard,
@@ -359,4 +366,26 @@ export function onDeviceDetailChanged(cb: (detail: DeviceDetail) => void): Promi
 /** Sent to the main window with the device id to select. */
 export function onSelectDevice(cb: (id: string) => void): Promise<() => void> {
   return subscribe<string>("select-device", cb);
+}
+
+/**
+ * Makes the HE profile with this 0-based index the active one on the keyboard (A9 11, never flash). Rejects with a
+ * contract error string: "writesDisabled", "usbRequired" (keyboard on 2.4 GHz), "disconnected", "busy" (another
+ * program talks to the keyboard), "outOfRange", "verifyFailed", "notSupported" (not the keyboard id),
+ * "deviceError:timeout" (state unknown, the backend re-read it; refreshDevice shows the result),
+ * "deviceError:<kind>".
+ */
+export async function setKeyboardProfile(id: string, profile: number): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    await wait(450);
+    const detail = await previewDetail(id);
+    if (!detail?.keyboard) throw "notSupported";
+    if (detail.readOnly) throw detail.connection !== "connected" ? "disconnected" : "writesDisabled";
+    if (detail.keyboard.connectionPath === "receiver") throw "usbRequired";
+    if (detail.keyboard.otherConfigurator) throw "busy";
+    if (!Number.isInteger(profile) || profile < 0 || profile >= (detail.keyboard.he?.profiles.length ?? 0)) throw "outOfRange";
+    previewKeyboardProfile = profile;
+    return (await previewDetail(id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_keyboard_profile", { id, profile });
 }

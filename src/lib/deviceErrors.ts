@@ -74,3 +74,24 @@ export function deviceErrorMessage(error: unknown): { key: MessageKey; vars?: Re
   if (code.startsWith("deviceError:")) return { key: "err.device", vars: { code: code.slice("deviceError:".length) } };
   return { key: "err.unknown" };
 }
+
+const keyboardErrorKeys = {
+  writesDisabled: "keyboard.err.writesDisabled",
+  disconnected: "keyboard.err.disconnected",
+  usbRequired: "keyboard.err.usbRequired",
+  busy: "keyboard.err.busy",
+  outOfRange: "keyboard.err.outOfRange",
+  verifyFailed: "keyboard.err.verifyFailed",
+  notSupported: "keyboard.err.notSupported",
+  "deviceError:timeout": "keyboard.err.timeout",
+  "deviceError:budget": "keyboard.err.budget",
+} as const satisfies Record<string, MessageKey>;
+
+/** Maps a set_keyboard_profile error code to a localized message key plus placeholder values. */
+export function keyboardErrorMessage(error: unknown): { key: MessageKey; vars?: Record<string, string> } {
+  const code = errorCode(error);
+  const known = (keyboardErrorKeys as Record<string, MessageKey | undefined>)[code];
+  if (known) return { key: known };
+  if (code.startsWith("deviceError:")) return { key: "keyboard.err.device", vars: { code: code.slice("deviceError:".length) } };
+  return { key: "keyboard.err.unknown" };
+}

@@ -13,6 +13,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use device_manager::{
     DeviceManager, REFRESH_WAIT, SAVE_WAIT, SaveRequest, SaveResult, WRITE_WAIT, WriteOp,
 };
+use keychron::KEYBOARD_WRITE_WAIT;
 use myhub_core::{DeviceDetail, DevicePrefs, DeviceSummary};
 use settings::{Settings, SettingsState};
 use sony::{AmbientArg, NcModeArg, SONY_WRITE_WAIT, SonyWrite, ToggleArg};
@@ -298,6 +299,29 @@ async fn run_mode(
     .map_err(|e| e.to_string())?
 }
 
+/// Makes HE profile `profile` (0-based) the active one on the K2 HE. Only the keyboard id
+/// is accepted. Needs `allowDeviceWrites` and the keyboard on the cable; the app never
+/// sends A9 1F. Errors: `writesDisabled`, `usbRequired`, `disconnected`, `busy`,
+/// `outOfRange`, `verifyFailed`, `notSupported`, `deviceError:<kind>`.
+#[tauri::command]
+async fn set_keyboard_profile(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    profile: i64,
+) -> Result<DeviceDetail, String> {
+    let answer = devices
+        .request_keyboard_profile(&id, profile)
+        .ok_or_else(|| "disconnected".to_owned())?;
+    // The wait blocks, so it must not run on an async worker thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        answer
+            .recv_timeout(KEYBOARD_WRITE_WAIT)
+            .map_err(|_| "deviceError:timeout".to_owned())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The values last applied to the device, `null` when there are none.
 #[tauri::command]
 fn get_device_prefs(devices: State<'_, DeviceManager>, id: String) -> Option<DevicePrefs> {
@@ -409,6 +433,7 @@ pub fn run() {
             set_eq_preset,
             set_eq_bands,
             set_headset_toggle,
+            set_keyboard_profile,
             open_main_window,
             hide_flyout
         ])
