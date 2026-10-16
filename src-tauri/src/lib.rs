@@ -13,7 +13,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use device_manager::{
     DeviceManager, REFRESH_WAIT, SAVE_WAIT, SaveRequest, SaveResult, WRITE_WAIT, WriteOp,
 };
-use keychron::KEYBOARD_WRITE_WAIT;
+use keychron::{KEYBOARD_SETTINGS_WAIT, KEYBOARD_WRITE_WAIT, TravelModeArg};
 use myhub_core::{DeviceDetail, DevicePrefs, DeviceSummary};
 use settings::{Settings, SettingsState};
 use sony::{AmbientArg, NcModeArg, SONY_WRITE_WAIT, SonyWrite, ToggleArg};
@@ -322,6 +322,58 @@ async fn set_keyboard_profile(
     .map_err(|e| e.to_string())?
 }
 
+/// Sets the global travel (actuation point, Rapid Trigger) of the CURRENT HE profile on the
+/// K2 HE and saves it to the keyboard (A9 14, A9 1F, only when a value changes). `profile` is the 0-based profile the UI shows as active; another current profile gives `profileChanged` before any write. Millimetres in, 0.1 mm on the wire.
+/// Errors: `writesDisabled`, `usbRequired`, `disconnected`, `busy`, `outOfRange`,
+/// `verifyFailed`, `verifyFailed:saved`, `profileChanged`, `notSupported`,
+/// `deviceError:<kind>` (also `status`, `budget`).
+#[tauri::command]
+async fn set_keyboard_travel(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    profile: i64,
+    mode: TravelModeArg,
+    actuation_mm: f64,
+    press_mm: f64,
+    release_mm: f64,
+) -> Result<DeviceDetail, String> {
+    let answer = devices
+        .request_keyboard_travel(&id, profile, mode, actuation_mm, press_mm, release_mm)
+        .ok_or_else(|| "disconnected".to_owned())?;
+    wait_keyboard(answer).await
+}
+
+/// Changes the global lighting of the K2 HE and saves it (VIA 07 03 per field, VIA 09 03).
+/// Hue and saturation go together. Same errors as `set_keyboard_travel`.
+#[tauri::command]
+async fn set_keyboard_lighting(
+    devices: State<'_, DeviceManager>,
+    id: String,
+    effect: Option<i64>,
+    brightness: Option<i64>,
+    speed: Option<i64>,
+    hue: Option<i64>,
+    saturation: Option<i64>,
+) -> Result<DeviceDetail, String> {
+    let answer = devices
+        .request_keyboard_lighting(&id, effect, brightness, speed, hue, saturation)
+        .ok_or_else(|| "disconnected".to_owned())?;
+    wait_keyboard(answer).await
+}
+
+/// Waits for a travel or lighting answer off the async worker threads.
+async fn wait_keyboard(
+    answer: std::sync::mpsc::Receiver<Result<DeviceDetail, String>>,
+) -> Result<DeviceDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        answer
+            .recv_timeout(KEYBOARD_SETTINGS_WAIT)
+            .map_err(|_| "deviceError:timeout".to_owned())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The values last applied to the device, `null` when there are none.
 #[tauri::command]
 fn get_device_prefs(devices: State<'_, DeviceManager>, id: String) -> Option<DevicePrefs> {
@@ -434,6 +486,8 @@ pub fn run() {
             set_eq_bands,
             set_headset_toggle,
             set_keyboard_profile,
+            set_keyboard_travel,
+            set_keyboard_lighting,
             open_main_window,
             hide_flyout
         ])

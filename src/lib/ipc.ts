@@ -8,6 +8,9 @@ import type {
   DeviceSummary,
   HeadsetToggle,
   HeadsetView,
+  HeProfileView,
+  KeyboardView,
+  LightingView,
   NcAsmArgs,
   SaveProfileArgs,
   SaveProfileResult,
@@ -117,6 +120,21 @@ let previewHeadset: Partial<HeadsetView> = {};
 // Dev preview only: HE profile "selected" through setKeyboardProfile (0-based).
 let previewKeyboardProfile: number | null = null;
 
+// Dev preview only: travel "saved" through setKeyboardTravel (per 0-based profile) and lighting through setKeyboardLighting.
+const previewKeyboardTravel = new Map<number, Pick<HeProfileView, "mode" | "actuationMm" | "pressMm" | "releaseMm">>();
+let previewKeyboardLight: Partial<LightingView> = {};
+
+/** Dev preview only: the keyboard fixture with the profile, travel and lighting the user "saved". */
+function withPreviewKeyboard(keyboard: KeyboardView): KeyboardView {
+  const he = keyboard.he && {
+    ...keyboard.he,
+    currentProfile: previewKeyboardProfile ?? keyboard.he.currentProfile,
+    profiles: keyboard.he.profiles.map((p) => ({ ...p, ...previewKeyboardTravel.get(p.index) })),
+  };
+  const lighting = keyboard.lighting && { ...keyboard.lighting, ...previewKeyboardLight };
+  return { ...keyboard, he, lighting };
+}
+
 /** Dev preview only: the fixture with applied values and a readOnly flag derived like the backend does. */
 async function previewDetail(id: string): Promise<DeviceDetail | null> {
   if (!previewDemo()) return null;
@@ -126,10 +144,7 @@ async function previewDetail(id: string): Promise<DeviceDetail | null> {
   return {
     ...detail,
     headset: detail.headset && { ...detail.headset, ...previewHeadset },
-    keyboard:
-      detail.keyboard?.he && previewKeyboardProfile !== null
-        ? { ...detail.keyboard, he: { ...detail.keyboard.he, currentProfile: previewKeyboardProfile } }
-        : detail.keyboard,
+    keyboard: detail.keyboard && withPreviewKeyboard(detail.keyboard),
     // Dev only: `&writes=1` makes a headset or keyboard fixture writable without turning the setting on.
     readOnly: !((previewSettings.allowDeviceWrites || ((detail.headset || detail.keyboard) && new URLSearchParams(window.location.search).get("writes") === "1")) && connected),
     dpi: detail.dpi && { ...detail.dpi, current: previewApplied.dpi ?? detail.dpi.current },
@@ -378,14 +393,98 @@ export function onSelectDevice(cb: (id: string) => void): Promise<() => void> {
 export async function setKeyboardProfile(id: string, profile: number): Promise<DeviceDetail> {
   if (!isTauri()) {
     await wait(450);
-    const detail = await previewDetail(id);
-    if (!detail?.keyboard) throw "notSupported";
-    if (detail.readOnly) throw detail.connection !== "connected" ? "disconnected" : "writesDisabled";
-    if (detail.keyboard.connectionPath === "receiver") throw "usbRequired";
-    if (detail.keyboard.otherConfigurator) throw "busy";
-    if (!Number.isInteger(profile) || profile < 0 || profile >= (detail.keyboard.he?.profiles.length ?? 0)) throw "outOfRange";
+    const detail = await previewKeyboardGate(id);
+    if (!Number.isInteger(profile) || profile < 0 || profile >= (detail.keyboard?.he?.profiles.length ?? 0)) throw "outOfRange";
     previewKeyboardProfile = profile;
     return (await previewDetail(id)) ?? detail;
   }
   return invoke<DeviceDetail>("set_keyboard_profile", { id, profile });
+}
+
+/** Dev preview only: the keyboard detail, or the error the backend gives before it reaches the worker or sends a frame. */
+async function previewKeyboardGate(id: string): Promise<DeviceDetail> {
+  const detail = await previewDetail(id);
+  if (!detail?.keyboard) throw "notSupported";
+  if (detail.readOnly) throw detail.connection !== "connected" ? "disconnected" : "writesDisabled";
+  if (detail.keyboard.connectionPath === "receiver") throw "usbRequired";
+  if (detail.keyboard.otherConfigurator) throw "busy";
+  return detail;
+}
+
+/** Travel of the active HE profile, in millimetres (0.1 mm steps). Press and release matter for "rapidTrigger" only. */
+export interface KeyboardTravelArgs {
+  /** 0-based profile the UI shows as active; the keyboard must still be on it. */
+  profile: number;
+  mode: "static" | "rapidTrigger";
+  actuationMm: number;
+  pressMm: number;
+  releaseMm: number;
+}
+
+/** Lighting fields to change; hue and saturation go together. Effect 0..24, the rest 0..255. */
+export interface KeyboardLightingArgs {
+  effect?: number;
+  brightness?: number;
+  speed?: number;
+  hue?: number;
+  saturation?: number;
+}
+
+/**
+ * Sets the actuation point and Rapid Trigger of the CURRENT HE profile and saves it to the keyboard (A9 14, A9 1F; the
+ * app always saves, but only when a value changes). Rejects with: "writesDisabled", "usbRequired", "disconnected", "busy", "outOfRange" (actuation
+ * 0.2..3.8 mm, press and release 0.1..3.8 mm, profile not a byte), "verifyFailed", "verifyFailed:saved" (flash was written, the value read
+ * back differs), "profileChanged" (the keyboard is not on args.profile, or changed before the save; nothing saved), "notSupported",
+ * "deviceError:timeout" (state unknown, the backend re-read it), "deviceError:<kind>" (also "status" and "budget").
+ */
+export async function setKeyboardTravel(id: string, args: KeyboardTravelArgs): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    await wait(600);
+    const detail = await previewKeyboardGate(id);
+    const tenths = (mm: number) => Math.round(mm * 10);
+    const inRange = (mm: number, min: number) => Number.isFinite(mm) && tenths(mm) >= min && tenths(mm) <= 38;
+    const rapid = args.mode === "rapidTrigger";
+    if (!inRange(args.actuationMm, 2) || (rapid && (!inRange(args.pressMm, 1) || !inRange(args.releaseMm, 1)))) throw "outOfRange";
+    const current = detail.keyboard?.he?.currentProfile ?? 0;
+    if (args.profile !== current) throw "profileChanged";
+    const was = detail.keyboard?.he?.profiles.find((p) => p.index === current);
+    previewKeyboardTravel.set(current, {
+      mode: args.mode,
+      actuationMm: tenths(args.actuationMm) / 10,
+      // Static keeps the stored press and release.
+      pressMm: rapid ? tenths(args.pressMm) / 10 : (was?.pressMm ?? 0.4),
+      releaseMm: rapid ? tenths(args.releaseMm) / 10 : (was?.releaseMm ?? 0.4),
+    });
+    return (await previewDetail(id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_keyboard_travel", { id, ...args });
+}
+
+/**
+ * Changes the global lighting and saves it to the keyboard (VIA 07 03 per field, VIA 09 03). Same rejections as
+ * setKeyboardTravel; "outOfRange" also for hue without saturation (or the reverse), an empty change, effect above 24
+ * or a byte outside 0..255. The keyboard may store brightness one step lower than sent; the answer shows what it holds.
+ */
+export async function setKeyboardLighting(id: string, args: KeyboardLightingArgs): Promise<DeviceDetail> {
+  if (!isTauri()) {
+    await wait(600);
+    const detail = await previewKeyboardGate(id);
+    const byte = (v: number | undefined) => v === undefined || (Number.isInteger(v) && v >= 0 && v <= 255);
+    const empty = Object.values(args).every((v) => v === undefined);
+    const effectOk = args.effect === undefined || (Number.isInteger(args.effect) && args.effect >= 0 && args.effect <= 24);
+    if (empty || !effectOk || !byte(args.brightness) || !byte(args.speed) || !byte(args.hue) || !byte(args.saturation)) throw "outOfRange";
+    if ((args.hue === undefined) !== (args.saturation === undefined)) throw "outOfRange";
+    const next: Partial<LightingView> = { ...previewKeyboardLight };
+    if (args.effect !== undefined) next.effect = args.effect;
+    // The device stores brightness one lower than sent.
+    if (args.brightness !== undefined) next.brightness = Math.max(0, args.brightness - 1);
+    if (args.speed !== undefined) next.speed = args.speed;
+    if (args.hue !== undefined && args.saturation !== undefined) {
+      next.hue = args.hue;
+      next.saturation = args.saturation;
+    }
+    previewKeyboardLight = next;
+    return (await previewDetail(id)) ?? detail;
+  }
+  return invoke<DeviceDetail>("set_keyboard_lighting", { id, ...args });
 }

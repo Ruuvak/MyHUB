@@ -50,6 +50,7 @@ use serde::Serialize;
 use crate::error::SessionError;
 use crate::link::RawLink;
 use crate::session::Session;
+use crate::writes::SaveMode;
 
 /// What to change. `None` leaves a value alone. Brightness and speed are 0..=255, the
 /// effect 0..=24 (refused by the policy otherwise), the colour is (hue, saturation).
@@ -172,6 +173,24 @@ pub fn set_lighting<L: RawLink>(
     change: LightChange,
     save: bool,
 ) -> Result<LightOutcome, SessionError> {
+    set_lighting_with(s, change, save.into())
+}
+
+/// [`set_lighting`] with a [`SaveMode`]: `IfChanged` sends VIA 09 03 only after a VIA 07 frame.
+pub fn set_lighting_with<L: RawLink>(
+    s: &mut Session<L>,
+    change: LightChange,
+    save: SaveMode,
+) -> Result<LightOutcome, SessionError> {
+    // Reads inside the sequence are sent once: the worst case is one reply timeout per frame.
+    s.single_reads(|s| lighting_inner(s, change, save))
+}
+
+fn lighting_inner<L: RawLink>(
+    s: &mut Session<L>,
+    change: LightChange,
+    save: SaveMode,
+) -> Result<LightOutcome, SessionError> {
     let before = read_light_state(s)?;
     let wanted = [
         change
@@ -192,7 +211,7 @@ pub fn set_lighting<L: RawLink>(
             .map(|(hue, saturation)| LightValue::Color { hue, saturation }),
     ];
     let writes: Vec<LightValue> = wanted.into_iter().flatten().collect();
-    if writes.is_empty() && !save {
+    if writes.is_empty() && save != SaveMode::Yes {
         return Ok(LightOutcome {
             before,
             after: before,
@@ -230,7 +249,7 @@ pub fn set_lighting<L: RawLink>(
         }
     }
     let mut saved = false;
-    if save {
+    if save != SaveMode::No {
         let policy = s.policy_with(Tier::Persistent);
         s.request_with(&policy, Request::SaveLighting)?;
         frames_written += 1;

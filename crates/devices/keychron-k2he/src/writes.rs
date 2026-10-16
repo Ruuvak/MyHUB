@@ -35,6 +35,22 @@ pub struct SelectOutcome {
     pub unchanged: bool,
 }
 
+/// When a travel or lighting write also saves to flash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveMode {
+    No,
+    /// Always save, even when the values already held.
+    Yes,
+    /// Save only when a write frame was needed; nothing is sent when nothing changes.
+    IfChanged,
+}
+
+impl From<bool> for SaveMode {
+    fn from(save: bool) -> Self {
+        if save { Self::Yes } else { Self::No }
+    }
+}
+
 /// One A9 10 read (Read tier). Also fills the policy's profile count and buffer size,
 /// which a profile request needs.
 pub fn read_profiles_info<L: RawLink>(s: &mut Session<L>) -> Result<ProfilesInfo, SessionError> {
@@ -57,10 +73,20 @@ pub fn read_profiles_info<L: RawLink>(s: &mut Session<L>) -> Result<ProfilesInfo
 /// [`SessionError::DeviceStatus`]; after it the profile is read back once more
 /// (`VerifyFailed { saved: true, .. }` on a mismatch).
 ///
-/// Errors are never retried. Any error after a write frame went out (Timeout,
+/// Errors are never retried, and the reads inside the call are sent once (no resend after a
+/// timeout). Any error after a write frame went out (Timeout,
 /// AmbiguousReply, ForeignTraffic, BadReport, a link error) leaves the keyboard state
 /// unknown: the caller must re-read A9 10 before it decides anything.
 pub fn select_profile<L: RawLink>(
+    s: &mut Session<L>,
+    profile: u8,
+    save: bool,
+) -> Result<SelectOutcome, SessionError> {
+    // Reads inside the sequence are sent once: the worst case is one reply timeout per frame.
+    s.single_reads(|s| select_inner(s, profile, save))
+}
+
+fn select_inner<L: RawLink>(
     s: &mut Session<L>,
     profile: u8,
     save: bool,

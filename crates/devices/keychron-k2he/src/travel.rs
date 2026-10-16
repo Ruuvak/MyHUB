@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::error::SessionError;
 use crate::link::RawLink;
 use crate::session::Session;
-use crate::writes::read_profiles_info;
+use crate::writes::{SaveMode, read_profiles_info};
 
 /// What to set. Values are in 0.1 mm, as on the wire. Actuation 2..=38; press and release
 /// 1..=38 (Rapid Trigger only).
@@ -129,7 +129,37 @@ pub fn set_travel_global<L: RawLink>(
     settings: TravelSettings,
     save: bool,
 ) -> Result<TravelOutcome, SessionError> {
+    set_travel_global_with(s, settings, save.into(), None)
+}
+
+/// [`set_travel_global`] with a [`SaveMode`] and an optional expected current profile. When
+/// `expected` is `Some` and the first A9 10 reads another profile, the call stops with
+/// [`SessionError::ProfileChanged`] before any write frame (`got` = the profile read).
+pub fn set_travel_global_with<L: RawLink>(
+    s: &mut Session<L>,
+    settings: TravelSettings,
+    save: SaveMode,
+    expected: Option<u8>,
+) -> Result<TravelOutcome, SessionError> {
+    // Reads inside the sequence are sent once: the worst case is one reply timeout per frame.
+    s.single_reads(|s| travel_inner(s, settings, save, expected))
+}
+
+fn travel_inner<L: RawLink>(
+    s: &mut Session<L>,
+    settings: TravelSettings,
+    save: SaveMode,
+    expected: Option<u8>,
+) -> Result<TravelOutcome, SessionError> {
     let profile = read_profiles_info(s)?.current;
+    if let Some(e) = expected
+        && e != profile
+    {
+        return Err(SessionError::ProfileChanged {
+            expected: e,
+            got: profile,
+        });
+    }
     let before = read_global_word(s, profile)?;
     let (press, release) = match settings.mode {
         TravelMode::Static => (
@@ -140,7 +170,7 @@ pub fn set_travel_global<L: RawLink>(
     };
     let expected: Expected = (key_mode(settings.mode), settings.actuation, press, release);
     let same = matches(&before, expected);
-    if same && !save {
+    if same && save != SaveMode::Yes {
         return Ok(TravelOutcome {
             profile,
             before,
@@ -178,7 +208,7 @@ pub fn set_travel_global<L: RawLink>(
         }
     }
     let mut saved = false;
-    if save {
+    if save != SaveMode::No {
         // A9 1F saves the current profile: refuse unless that is still the one we edited.
         let current = read_profiles_info(s)?.current;
         if current != profile {

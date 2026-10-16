@@ -295,3 +295,24 @@ fn a_profile_changed_on_the_keyboard_before_the_save_refuses_it() {
     );
     assert_eq!(count(&h, &[0xA9, 0x1F]), 0);
 }
+
+#[test]
+fn a_read_inside_a_write_sequence_is_sent_once() {
+    // Nothing answers: the first A9 10 times out and is not resent.
+    let mock = Mock::new(|_, _| vec![]);
+    let h = mock.handle();
+    let mut s = Session::with_link(mock);
+    s.set_reply_timeout(Duration::from_millis(200));
+    assert_eq!(
+        select_profile(&mut s, 2, false).unwrap_err(),
+        SessionError::Timeout
+    );
+    assert_eq!(sent(&h), [rep(&[0xA9, 0x10])]);
+    // Outside a write sequence the same read still gets its resends.
+    let before = sent(&h).len();
+    assert_eq!(
+        keychron_k2he::read_profiles_info(&mut s).unwrap_err(),
+        SessionError::Timeout
+    );
+    assert_eq!(sent(&h).len() - before, 3);
+}

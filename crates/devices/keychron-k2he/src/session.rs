@@ -159,6 +159,9 @@ pub struct Session<L: RawLink> {
     last_write: Option<Instant>,
     /// The device this session talks to; fixed at open.
     target: Target,
+    /// Reads are sent once, without the resends of [`READ_RETRIES`] (inside a write
+    /// sequence, so the worst case stays bounded). See `single_reads`.
+    single_read: bool,
 }
 
 impl<L: RawLink> Session<L> {
@@ -184,6 +187,7 @@ impl<L: RawLink> Session<L> {
             frames_sent: 0,
             matched: 1,
             last_write: None,
+            single_read: false,
         }
     }
 
@@ -242,6 +246,28 @@ impl<L: RawLink> Session<L> {
         self.policy.with_tier(tier)
     }
 
+    /// Runs `f` with every read sent once (no resend after a timeout), then restores the
+    /// previous setting. Write sequences use it: with reads at one attempt the worst case
+    /// is one reply timeout per frame.
+    pub(crate) fn single_reads<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        // A guard, so the flag is restored even if `f` panics.
+        struct Restore<'a, L: RawLink> {
+            session: &'a mut Session<L>,
+            before: bool,
+        }
+        impl<L: RawLink> Drop for Restore<'_, L> {
+            fn drop(&mut self) {
+                self.session.single_read = self.before;
+            }
+        }
+        let before = std::mem::replace(&mut self.single_read, true);
+        let guard = Restore {
+            session: self,
+            before,
+        };
+        f(&mut *guard.session)
+    }
+
     /// Check `request` against the policy and run it: drain, write, wait for the reply.
     /// A read is resent up to [`READ_RETRIES`] times after a timeout; nothing else is.
     pub fn request(&mut self, request: Request) -> Result<Frame, SessionError> {
@@ -287,7 +313,7 @@ impl<L: RawLink> Session<L> {
     fn exchange(&mut self, checked: &CheckedRequest) -> Result<Frame, SessionError> {
         self.drain()?;
         // Only reads are resent: a write that timed out may have been applied.
-        let attempts = if checked.tier() == Tier::Read {
+        let attempts = if checked.tier() == Tier::Read && !self.single_read {
             1 + READ_RETRIES
         } else {
             1

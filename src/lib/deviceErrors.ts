@@ -82,12 +82,15 @@ const keyboardErrorKeys = {
   busy: "keyboard.err.busy",
   outOfRange: "keyboard.err.outOfRange",
   verifyFailed: "keyboard.err.verifyFailed",
+  "verifyFailed:saved": "keyboard.err.verifyFailedSaved",
+  profileChanged: "keyboard.err.profileChanged",
   notSupported: "keyboard.err.notSupported",
   "deviceError:timeout": "keyboard.err.timeout",
   "deviceError:budget": "keyboard.err.budget",
+  "deviceError:status": "keyboard.err.status",
 } as const satisfies Record<string, MessageKey>;
 
-/** Maps a set_keyboard_profile error code to a localized message key plus placeholder values. */
+/** Maps a set_keyboard_profile, set_keyboard_travel or set_keyboard_lighting error code to a localized message key plus placeholder values. */
 export function keyboardErrorMessage(error: unknown): { key: MessageKey; vars?: Record<string, string> } {
   const code = errorCode(error);
   const known = (keyboardErrorKeys as Record<string, MessageKey | undefined>)[code];

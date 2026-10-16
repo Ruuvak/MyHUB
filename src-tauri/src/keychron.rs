@@ -1,5 +1,6 @@
 //! Keyboard worker: one background thread ("keychron-worker") shows the Keychron K2 HE
-//! next to the other devices. Read only in this slice.
+//! next to the other devices. Writes (USB only, `allowDeviceWrites` on): HE profile select,
+//! global travel of the current profile, global lighting; see [`KeyboardWrite`].
 //!
 //! Discovery does not talk to the keyboard: the worker enumerates HID interfaces every
 //! 2 s while the keyboard is not connected. USB has priority. When the keyboard's raw HID
@@ -36,12 +37,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keychron_k2he::{
-    DEVICE_ID, Incoming, KeyboardCache, LinkSnapshot, RawLink, Session, SessionError, Snapshot,
-    cache_of, cache_path, list_interfaces, list_receiver_interfaces, read_link, read_link_state,
-    read_profiles_info, read_snapshot, refresh_state, select_profile, to_detail,
-    to_receiver_detail,
+    DEVICE_ID, Incoming, KeyWord, KeyboardCache, LightChange, LightState, LinkSnapshot, RawLink,
+    SaveMode, Session, SessionError, Snapshot, TravelMode, TravelSettings, cache_of, cache_path,
+    list_interfaces, list_receiver_interfaces, read_global_word, read_light_state, read_link,
+    read_link_state, read_profiles_info, read_snapshot, refresh_state, select_profile,
+    set_lighting_with, set_travel_global_with, to_detail, to_receiver_detail,
 };
+
 use myhub_core::{Connection, DeviceDetail};
+use serde::Deserialize;
 use tauri::Manager;
 
 use crate::device_manager::{ManagerState, Slot, clock_ms, lock, publish_slot};
@@ -65,13 +69,12 @@ pub enum KeychronCommand {
     /// Re-read the profile and lighting values and answer with the new detail (the
     /// cached one while another program talks to the keyboard).
     Refresh { reply: Sender<Option<DeviceDetail>> },
-    /// Make `profile` (0-based, as sent by the UI) the active HE profile. Only over USB;
-    /// A9 11 and its A9 10 check, never A9 1F. The answer is the new detail or a
-    /// contract error code.
-    SelectProfile {
-        profile: i64,
-        /// The caller's give-up instant minus a margin; a write starts only with
-        /// [`MIN_WRITE_BUDGET`] left.
+    /// A write to the keyboard (profile select, travel, lighting). Only over USB. The
+    /// answer is the new detail or a contract error code.
+    Write {
+        op: KeyboardWrite,
+        /// The caller's give-up instant minus a margin; a write starts only with the
+        /// budget of its kind left ([`MIN_SELECT_BUDGET`], [`MIN_SETTINGS_BUDGET`]).
         deadline: Instant,
         reply: Sender<Result<DeviceDetail, String>>,
     },
@@ -85,20 +88,151 @@ pub enum KeychronCommand {
 /// 2 s margin.
 pub const KEYBOARD_WRITE_WAIT: Duration = Duration::from_secs(15);
 
-/// A write starts only when at least this much of the deadline is left. Worst case is about
-/// 10 s: A9 10 (1 s, resent twice), A9 11 (1 s, never resent), verify A9 10 (3 x 1 s) and
-/// the re-read A9 10 (3 x 1 s).
-const MIN_WRITE_BUDGET: Duration = Duration::from_secs(11);
+/// How long the caller waits for a travel or lighting write (deadline: this minus 2 s).
+pub const KEYBOARD_SETTINGS_WAIT: Duration = Duration::from_secs(25);
 
-/// A queued profile selection.
-struct PendingSelect {
-    profile: i64,
+/// A profile selection starts only when at least this much of the deadline is left. The
+/// reads inside `select_profile` are single attempts now, so its worst case is about 6 s
+/// (A9 10, A9 11, A9 10 at 1 s each, then a re-read A9 10 with its resends up to 3 s); the
+/// old 11 s is kept, it could be lowered to about 7 s.
+const MIN_SELECT_BUDGET: Duration = Duration::from_secs(11);
+
+/// A travel or lighting write starts only when at least this much of the deadline is left.
+/// With single-attempt reads every frame costs at most one 1 s reply timeout: travel is at
+/// most 7 frames, lighting at most 17 (12 reads, 4 VIA 07, VIA 09 03), plus two 250 ms
+/// write gaps per extra write frame and the re-read after an error.
+const MIN_SETTINGS_BUDGET: Duration = Duration::from_secs(20);
+
+/// Newest effect number of the keyboard's global lighting [OBS effectMax 24].
+const EFFECT_MAX: i64 = 24;
+
+/// `mode` argument of `set_keyboard_travel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TravelModeArg {
+    Static,
+    RapidTrigger,
+}
+
+/// A write to the keyboard, already range checked (the profile index is checked against
+/// the profile count in the worker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardWrite {
+    /// 0-based HE profile index, as sent by the UI.
+    Profile(i64),
+    /// The settings and the 0-based profile the UI edits (the keyboard must still be on it).
+    Travel {
+        settings: TravelSettings,
+        profile: u8,
+    },
+    Lighting(LightChange),
+}
+
+impl KeyboardWrite {
+    /// How long the caller of this write waits.
+    pub fn wait(&self) -> Duration {
+        match self {
+            Self::Profile(_) => KEYBOARD_WRITE_WAIT,
+            Self::Travel { .. } | Self::Lighting(_) => KEYBOARD_SETTINGS_WAIT,
+        }
+    }
+
+    fn min_budget(&self) -> Duration {
+        match self {
+            Self::Profile(_) => MIN_SELECT_BUDGET,
+            Self::Travel { .. } | Self::Lighting(_) => MIN_SETTINGS_BUDGET,
+        }
+    }
+
+    /// A travel write from millimetres: 0.1 mm units (rounded), actuation 0.2..=3.8 mm,
+    /// press and release 0.1..=3.8 mm (Rapid Trigger only, ignored and unchecked in Static
+    /// mode). `profile` (0-based, the profile the UI shows as active) must fit a byte. `outOfRange`
+    /// otherwise.
+    pub fn travel(
+        profile: i64,
+        mode: TravelModeArg,
+        actuation_mm: f64,
+        press_mm: f64,
+        release_mm: f64,
+    ) -> Result<Self, String> {
+        let tenths = |mm: f64, min: u8| -> Result<u8, String> {
+            let t = (mm * 10.0).round();
+            if mm.is_finite() && t >= f64::from(min) && t <= 38.0 {
+                Ok(t as u8)
+            } else {
+                Err("outOfRange".to_owned())
+            }
+        };
+        let profile = u8::try_from(profile).map_err(|_| "outOfRange".to_owned())?;
+        let actuation = tenths(actuation_mm, 2)?;
+        let (mode, press, release) = match mode {
+            TravelModeArg::Static => (TravelMode::Static, 0, 0),
+            TravelModeArg::RapidTrigger => (
+                TravelMode::RapidTrigger,
+                tenths(press_mm, 1)?,
+                tenths(release_mm, 1)?,
+            ),
+        };
+        Ok(Self::Travel {
+            settings: TravelSettings {
+                mode,
+                actuation,
+                press,
+                release,
+            },
+            profile,
+        })
+    }
+
+    /// A lighting write: effect 0..=24, brightness, speed, hue and saturation 0..=255;
+    /// hue and saturation together or neither; at least one field. `outOfRange` otherwise.
+    pub fn lighting(
+        effect: Option<i64>,
+        brightness: Option<i64>,
+        speed: Option<i64>,
+        hue: Option<i64>,
+        saturation: Option<i64>,
+    ) -> Result<Self, String> {
+        let bad = || "outOfRange".to_owned();
+        let byte = |v: i64| u8::try_from(v).map_err(|_| bad());
+        let effect = effect
+            .map(|v| {
+                if (0..=EFFECT_MAX).contains(&v) {
+                    byte(v)
+                } else {
+                    Err(bad())
+                }
+            })
+            .transpose()?;
+        let brightness = brightness.map(byte).transpose()?;
+        let speed = speed.map(byte).transpose()?;
+        let color = match (hue, saturation) {
+            (Some(h), Some(s)) => Some((byte(h)?, byte(s)?)),
+            (None, None) => None,
+            _ => return Err(bad()),
+        };
+        let change = LightChange {
+            effect,
+            brightness,
+            speed,
+            color,
+        };
+        if change == LightChange::default() {
+            return Err(bad());
+        }
+        Ok(Self::Lighting(change))
+    }
+}
+
+/// A queued keyboard write.
+struct PendingWrite {
+    op: KeyboardWrite,
     deadline: Instant,
     reply: Sender<Result<DeviceDetail, String>>,
 }
 
-/// What a profile selection did to the keyboard state.
-struct SelectResult {
+/// What a keyboard write did to the keyboard state.
+struct WriteResult {
     /// `Ok` or the contract error code.
     answer: Result<(), String>,
     /// The cached snapshot or the foreign flag changed.
@@ -107,7 +241,30 @@ struct SelectResult {
     lost: Option<String>,
 }
 
-impl SelectResult {
+/// What a failed travel or lighting write re-reads.
+#[derive(Clone, Copy)]
+enum Reread {
+    Travel,
+    /// The global word of this profile only.
+    Word(u8),
+    Lighting,
+}
+
+/// `deviceError:budget` when less of the deadline is left than `op` needs; nothing is sent.
+fn budget_refusal(op: KeyboardWrite, deadline: Instant, now: Instant) -> Option<WriteResult> {
+    (deadline.saturating_duration_since(now) < op.min_budget())
+        .then(|| WriteResult::refused("deviceError:budget"))
+}
+
+impl WriteResult {
+    fn ok() -> Self {
+        Self {
+            answer: Ok(()),
+            changed: false,
+            lost: None,
+        }
+    }
+
     fn refused(code: &str) -> Self {
         Self {
             answer: Err(code.to_owned()),
@@ -210,25 +367,18 @@ impl<L: RawLink> Keyboard<L> {
         profile: i64,
         deadline: Instant,
         now: Instant,
-    ) -> SelectResult {
-        if !writes_allowed {
-            return SelectResult::refused("writesDisabled");
-        }
-        if self.other_configurator() {
-            return SelectResult::refused("busy");
+    ) -> WriteResult {
+        if let Some(refusal) = self.refuse_early(writes_allowed) {
+            return refusal;
         }
         let count = i64::from(self.snapshot.profiles_info.count);
         let Some(index) = u8::try_from(profile).ok().filter(|p| i64::from(*p) < count) else {
-            return SelectResult::refused("outOfRange");
+            return WriteResult::refused("outOfRange");
         };
-        if deadline.saturating_duration_since(now) < MIN_WRITE_BUDGET {
-            return SelectResult::refused("deviceError:budget");
+        if let Some(refusal) = budget_refusal(KeyboardWrite::Profile(profile), deadline, now) {
+            return refusal;
         }
-        let mut result = SelectResult {
-            answer: Ok(()),
-            changed: false,
-            lost: None,
-        };
+        let mut result = WriteResult::ok();
         match select_profile(&mut self.session, index, false) {
             Ok(outcome) => {
                 result.changed = self.patch_profile(outcome.after);
@@ -266,6 +416,201 @@ impl<L: RawLink> Keyboard<L> {
             }
         }
         result
+    }
+
+    /// The first two preconditions of every write, in order: writes allowed, no other
+    /// configurator.
+    fn refuse_early(&self, writes_allowed: bool) -> Option<WriteResult> {
+        if !writes_allowed {
+            Some(WriteResult::refused("writesDisabled"))
+        } else if self.other_configurator() {
+            Some(WriteResult::refused("busy"))
+        } else {
+            None
+        }
+    }
+
+    /// Set the global travel of the CURRENT profile and save it (A9 14, A9 1F). The values
+    /// are range checked by the caller. Preconditions: writes allowed, no other
+    /// configurator, enough budget. Success patches the current profile's global word from
+    /// the read-back.
+    fn set_travel(
+        &mut self,
+        writes_allowed: bool,
+        settings: TravelSettings,
+        profile: u8,
+        deadline: Instant,
+        now: Instant,
+    ) -> WriteResult {
+        if let Some(refusal) = self.refuse_early(writes_allowed) {
+            return refusal;
+        }
+        if let Some(refusal) =
+            budget_refusal(KeyboardWrite::Travel { settings, profile }, deadline, now)
+        {
+            return refusal;
+        }
+        let mut result = WriteResult::ok();
+        // Save only when a write was needed; the keyboard must still be on the profile the UI edits.
+        match set_travel_global_with(
+            &mut self.session,
+            settings,
+            SaveMode::IfChanged,
+            Some(profile),
+        ) {
+            Ok(outcome) => {
+                result.changed = self.patch_profile(outcome.profile);
+                result.changed |= self.patch_travel(outcome.profile, outcome.after);
+            }
+            Err(error) => self.write_failed(error, now, Reread::Travel, &mut result),
+        }
+        result
+    }
+
+    /// Change the global lighting and save it (VIA 07 03 per field, VIA 09 03). Same
+    /// preconditions as [`Keyboard::set_travel`].
+    fn set_lighting(
+        &mut self,
+        writes_allowed: bool,
+        change: LightChange,
+        deadline: Instant,
+        now: Instant,
+    ) -> WriteResult {
+        if let Some(refusal) = self.refuse_early(writes_allowed) {
+            return refusal;
+        }
+        if let Some(refusal) = budget_refusal(KeyboardWrite::Lighting(change), deadline, now) {
+            return refusal;
+        }
+        let mut result = WriteResult::ok();
+        match set_lighting_with(&mut self.session, change, SaveMode::IfChanged) {
+            Ok(outcome) => result.changed = self.patch_light(outcome.after),
+            Err(error) => self.write_failed(error, now, Reread::Lighting, &mut result),
+        }
+        result
+    }
+
+    /// Runs one queued write.
+    fn write(
+        &mut self,
+        op: KeyboardWrite,
+        writes_allowed: bool,
+        deadline: Instant,
+        now: Instant,
+    ) -> WriteResult {
+        match op {
+            KeyboardWrite::Profile(profile) => {
+                self.select_profile(writes_allowed, profile, deadline, now)
+            }
+            KeyboardWrite::Travel { settings, profile } => {
+                self.set_travel(writes_allowed, settings, profile, deadline, now)
+            }
+            KeyboardWrite::Lighting(change) => {
+                self.set_lighting(writes_allowed, change, deadline, now)
+            }
+        }
+    }
+
+    /// The error of a travel or lighting write. A mismatch, a status error or a timeout
+    /// leaves the state unknown, so what the write touched is read again (the first failed
+    /// read ends the re-read). A policy refusal and a device status sent no change.
+    fn write_failed(
+        &mut self,
+        error: SessionError,
+        now: Instant,
+        reread: Reread,
+        result: &mut WriteResult,
+    ) {
+        match error {
+            SessionError::VerifyMismatch { saved, .. } => {
+                let code = if saved {
+                    "verifyFailed:saved"
+                } else {
+                    "verifyFailed"
+                };
+                result.answer = Err(code.to_owned());
+                self.reread(reread, now, result);
+            }
+            SessionError::ProfileChanged { expected, got } => {
+                result.changed = self.patch_profile(got);
+                result.answer = Err("profileChanged".to_owned());
+                // If A9 14 went out before the profile changed, the old profile's word in RAM
+                // may differ from the cache: read it again (one frame).
+                self.reread(Reread::Word(expected), now, result);
+            }
+            SessionError::ForeignTraffic
+            | SessionError::BackingOff { .. }
+            | SessionError::BadReport(_) => {
+                result.changed = self.mark_foreign(now);
+                result.answer = Err("busy".to_owned());
+            }
+            SessionError::Link(_) => {
+                result.answer = Err(format!("deviceError:{}", error_kind(&error)));
+                result.lost = Some(error.to_string());
+            }
+            // A9 1F refused after A9 14 went out: RAM holds the new value, read it again.
+            SessionError::DeviceStatus { sub: 0x1F, .. } => {
+                result.answer = Err(format!("deviceError:{}", error_kind(&error)));
+                self.reread(reread, now, result);
+            }
+            // A refused A9 14 or a policy refusal changed nothing.
+            SessionError::DeviceStatus { .. } | SessionError::Policy(_) => {
+                result.answer = Err(format!("deviceError:{}", error_kind(&error)));
+            }
+            other => {
+                result.answer = Err(format!("deviceError:{}", error_kind(&other)));
+                self.reread(reread, now, result);
+            }
+        }
+    }
+
+    /// Reads again what a failed write touched and patches the snapshot.
+    fn reread(&mut self, reread: Reread, now: Instant, result: &mut WriteResult) {
+        let read = match reread {
+            Reread::Travel => read_profiles_info(&mut self.session).and_then(|info| {
+                let word = read_global_word(&mut self.session, info.current)?;
+                let mut changed = self.patch_profile(info.current);
+                changed |= self.patch_travel(info.current, word);
+                Ok(changed)
+            }),
+            Reread::Word(profile) => read_global_word(&mut self.session, profile)
+                .map(|word| self.patch_travel(profile, word)),
+            Reread::Lighting => {
+                read_light_state(&mut self.session).map(|state| self.patch_light(state))
+            }
+        };
+        match read {
+            Ok(changed) => result.changed |= changed,
+            Err(e) => match self.failed(&e, now) {
+                Ok(flipped) => result.changed |= flipped,
+                Err(reason) => result.lost = Some(reason),
+            },
+        }
+    }
+
+    /// Sets the global word of `profile`; `true` when it changed.
+    fn patch_travel(&mut self, profile: u8, word: KeyWord) -> bool {
+        match self.snapshot.profiles.get_mut(usize::from(profile)) {
+            Some(p) if p.global != word => {
+                p.global = word;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Sets the cached lighting values; `true` when one changed.
+    fn patch_light(&mut self, state: LightState) -> bool {
+        let fresh = keychron_k2he::LightSettings {
+            brightness: Some(state.brightness),
+            effect: Some(state.effect),
+            speed: Some(state.speed),
+            hue: Some(state.hue),
+            saturation: Some(state.saturation),
+        };
+        let changed = self.snapshot.light != fresh;
+        self.snapshot.light = fresh;
+        changed
     }
 
     /// Sets the cached current profile; `true` when it changed.
@@ -583,12 +928,12 @@ impl KeychronWorker {
             while let Ok(command) = self.commands.try_recv() {
                 match command {
                     KeychronCommand::Refresh { reply } => replies.push(reply),
-                    KeychronCommand::SelectProfile {
-                        profile,
+                    KeychronCommand::Write {
+                        op,
                         deadline,
                         reply,
-                    } => selects.push(PendingSelect {
-                        profile,
+                    } => selects.push(PendingWrite {
+                        op,
                         deadline,
                         reply,
                     }),
@@ -596,7 +941,7 @@ impl KeychronWorker {
                     KeychronCommand::Wake => {}
                 }
             }
-            if let Err(reason) = self.run_selects(keyboard, stamp, cache, selects) {
+            if let Err(reason) = self.run_writes(keyboard, stamp, cache, selects) {
                 answer_all(replies, Some(self.stamped(keyboard, false, *stamp)));
                 return Outcome::Lost(reason);
             }
@@ -635,18 +980,18 @@ impl KeychronWorker {
         Outcome::Stopped
     }
 
-    /// Runs the queued profile selections one after the other. `allowDeviceWrites` is
+    /// Runs the queued keyboard writes one after the other. `allowDeviceWrites` is
     /// read once per command. A change is cached, stored and published before the
     /// answer goes out. `Err` with the reason when the link is gone: the command that
     /// met it gets its error code, the ones behind it `disconnected`.
-    fn run_selects(
+    fn run_writes(
         &self,
         keyboard: &mut Keyboard<keychron_k2he::HidapiLink>,
         stamp: &mut u64,
         cache: &mut Option<KeyboardCache>,
-        selects: Vec<PendingSelect>,
+        selects: Vec<PendingWrite>,
     ) -> Result<(), String> {
-        drain_selects(
+        drain_writes(
             keyboard,
             selects,
             || self.writes_allowed(),
@@ -709,7 +1054,7 @@ impl KeychronWorker {
             while let Ok(command) = self.commands.try_recv() {
                 match command {
                     KeychronCommand::Refresh { reply } => replies.push(reply),
-                    KeychronCommand::SelectProfile { reply, .. } => {
+                    KeychronCommand::Write { reply, .. } => {
                         let code = no_usb_refusal(self.writes_allowed(), link.linked);
                         let _ = reply.send(Err(code.to_owned()));
                     }
@@ -849,7 +1194,7 @@ impl KeychronWorker {
                     let cached = lock(&self.state).find(DEVICE_ID);
                     let _ = reply.send(cached);
                 }
-                Ok(KeychronCommand::SelectProfile { reply, .. }) => {
+                Ok(KeychronCommand::Write { reply, .. }) => {
                     let code = no_usb_refusal(self.writes_allowed(), false);
                     let _ = reply.send(Err(code.to_owned()));
                 }
@@ -863,26 +1208,21 @@ impl KeychronWorker {
     }
 }
 
-/// Runs the queued selections one after the other. `writes_allowed` is asked once per
+/// Runs the queued writes one after the other. `writes_allowed` is asked once per
 /// command. `settle(keyboard, changed, publish)` is called after each command (stamp,
 /// cache, and publish when asked) and returns the detail to answer with; it is called
 /// before the answer is sent, and for a command that ended the link only when something
 /// changed (without publishing). `Err` with the reason when the link is gone: that
 /// command gets its error code, the ones behind it `disconnected`.
-fn drain_selects<L: RawLink>(
+fn drain_writes<L: RawLink>(
     keyboard: &mut Keyboard<L>,
-    selects: Vec<PendingSelect>,
+    selects: Vec<PendingWrite>,
     mut writes_allowed: impl FnMut() -> bool,
     mut settle: impl FnMut(&Keyboard<L>, bool, bool) -> DeviceDetail,
 ) -> Result<(), String> {
     let mut selects = selects.into_iter();
     while let Some(select) = selects.next() {
-        let result = keyboard.select_profile(
-            writes_allowed(),
-            select.profile,
-            select.deadline,
-            Instant::now(),
-        );
+        let result = keyboard.write(select.op, writes_allowed(), select.deadline, Instant::now());
         if let Some(reason) = result.lost {
             if result.changed {
                 settle(keyboard, true, false);
@@ -936,6 +1276,7 @@ mod tests {
     }
 
     /// A keyboard's HE profile state for the select tests.
+    #[derive(Default)]
     struct He {
         current: u8,
         /// A9 11 gets no reply and changes nothing.
@@ -944,6 +1285,16 @@ mod tests {
         stuck: bool,
         /// A9 11 is answered by a report that is not its reply (another program).
         foreign_select: bool,
+        /// Global word of every profile (mode | distance << 2 | press << 8 | release << 14).
+        word: u32,
+        /// [brightness, effect, speed, hue, saturation]
+        light: [u8; 5],
+        /// A9 14 gets no reply and changes nothing.
+        mute_travel: bool,
+        /// A9 1F changes the word to this one (the save did not keep the value).
+        corrupt_on_save: Option<u32>,
+        /// Brightness is stored this much lower than sent.
+        bright_delta: u8,
     }
 
     /// A link that holds what the test queued and counts the reports written; it
@@ -971,12 +1322,55 @@ mod tests {
                         }
                         Some(vec![0xA9, 0x11, 0, report[3]])
                     }
+                    0x12 => {
+                        let mut r = vec![0xA9, 0x12, report[3], 0, 0, 4];
+                        r.extend_from_slice(&he.word.to_le_bytes());
+                        Some(r)
+                    }
+                    0x14 if !he.mute_travel => {
+                        let p = |i: usize| u32::from(report[i]);
+                        he.word = p(4) | p(5) << 2 | p(6) << 8 | p(7) << 14;
+                        Some(vec![0xA9, 0x14, 0])
+                    }
+                    0x1F => {
+                        if let Some(w) = he.corrupt_on_save {
+                            he.word = w;
+                        }
+                        Some(vec![0xA9, 0x1F, 0])
+                    }
                     _ => None,
                 };
                 if let Some(mut reply) = reply {
                     reply.resize(32, 0);
                     shared.inbox.push_back(reply);
                 }
+            }
+            if matches!(report[1], 0x07..=0x09)
+                && report[2] == 0x03
+                && let Some(he) = shared.he.as_mut()
+            {
+                let id = usize::from(report[3]);
+                let mut reply = match report[1] {
+                    0x08 => {
+                        let mut r = vec![0x08, 0x03, report[3]];
+                        match id {
+                            1..=3 => r.push(he.light[id - 1]),
+                            _ => r.extend_from_slice(&he.light[3..5]),
+                        }
+                        r
+                    }
+                    0x07 => {
+                        match id {
+                            1 => he.light[0] = report[4].saturating_sub(he.bright_delta),
+                            2 | 3 => he.light[id - 1] = report[4],
+                            _ => he.light[3..5].copy_from_slice(&report[4..6]),
+                        }
+                        report[1..].to_vec()
+                    }
+                    _ => report[1..].to_vec(),
+                };
+                reply.resize(32, 0);
+                shared.inbox.push_back(reply);
             }
             if report[1] == 0xB2
                 && let Some(reply) = shared.b2.clone()
@@ -1198,11 +1592,12 @@ mod tests {
             mute_select,
             stuck,
             foreign_select: false,
+            ..He::default()
         });
         (kb, shared)
     }
 
-    fn select(kb: &mut Keyboard<Mock>, writes: bool, profile: i64) -> SelectResult {
+    fn select(kb: &mut Keyboard<Mock>, writes: bool, profile: i64) -> WriteResult {
         let now = Instant::now();
         kb.select_profile(writes, profile, now + SELECT_BUDGET, now)
     }
@@ -1210,7 +1605,7 @@ mod tests {
     #[test]
     fn select_preconditions_refuse_before_any_frame() {
         let (mut kb, shared) = he_keyboard(false, false);
-        let err = |r: SelectResult| r.answer.unwrap_err();
+        let err = |r: WriteResult| r.answer.unwrap_err();
         assert_eq!(err(select(&mut kb, false, 2)), "writesDisabled");
         assert_eq!(err(select(&mut kb, true, 3)), "outOfRange");
         assert_eq!(err(select(&mut kb, true, -1)), "outOfRange");
@@ -1288,12 +1683,12 @@ mod tests {
         );
     }
 
-    fn pending(profile: i64) -> (PendingSelect, mpsc::Receiver<Result<DeviceDetail, String>>) {
+    fn pending(profile: i64) -> (PendingWrite, mpsc::Receiver<Result<DeviceDetail, String>>) {
         let (reply, answer) = mpsc::channel();
         let deadline = Instant::now() + SELECT_BUDGET;
         (
-            PendingSelect {
-                profile,
+            PendingWrite {
+                op: KeyboardWrite::Profile(profile),
                 deadline,
                 reply,
             },
@@ -1327,7 +1722,7 @@ mod tests {
         shared.borrow_mut().fail_write_at = Some(2);
         let (first, first_rx) = pending(2);
         let (second, second_rx) = pending(0);
-        let result = drain_selects(
+        let result = drain_writes(
             &mut kb,
             vec![first, second],
             || true,
@@ -1350,7 +1745,7 @@ mod tests {
         let (second, second_rx) = pending(0);
         let published = RefCell::new(Vec::new());
         let asked = RefCell::new(0);
-        let result = drain_selects(
+        let result = drain_writes(
             &mut kb,
             vec![first, second],
             || {
@@ -1375,5 +1770,258 @@ mod tests {
         // Only the first command sent frames: A9 10, A9 11, A9 10.
         assert_eq!(shared.borrow().written, 3);
         assert_eq!(*asked.borrow(), 2);
+    }
+
+    fn word(mode: u32, distance: u32, press: u32, release: u32) -> u32 {
+        mode | distance << 2 | press << 8 | release << 14
+    }
+
+    /// A keyboard on profile 1 with global words and lighting set, and a snapshot that
+    /// holds the same values (three profiles, all rapid trigger 2.0 / 0.4 / 0.4).
+    fn settings_keyboard(configure: impl FnOnce(&mut He)) -> (Keyboard<Mock>, Rc<RefCell<Shared>>) {
+        let (mut kb, shared) = he_keyboard(false, false);
+        {
+            let mut s = shared.borrow_mut();
+            let he = s.he.as_mut().unwrap();
+            he.word = word(2, 20, 4, 4);
+            he.light = [200, 6, 50, 10, 20];
+            configure(he);
+        }
+        kb.snapshot.profiles = (0..3)
+            .map(|_| keychron_proto::he::ProfileBuffer {
+                rows: 6,
+                cols: 16,
+                global: KeyWord::from_u32(word(2, 20, 4, 4)),
+                keys: Vec::new(),
+                dks: Vec::new(),
+                snap: Vec::new(),
+                name: String::new(),
+            })
+            .collect();
+        kb.snapshot.light = keychron_k2he::LightSettings {
+            brightness: Some(200),
+            effect: Some(6),
+            speed: Some(50),
+            hue: Some(10),
+            saturation: Some(20),
+        };
+        (kb, shared)
+    }
+
+    fn travel(mode: TravelModeArg, actuation: f64, press: f64, release: f64) -> KeyboardWrite {
+        KeyboardWrite::travel(1, mode, actuation, press, release).unwrap()
+    }
+
+    fn run(kb: &mut Keyboard<Mock>, writes: bool, op: KeyboardWrite) -> WriteResult {
+        let now = Instant::now();
+        kb.write(op, writes, now + Duration::from_secs(23), now)
+    }
+
+    fn profile_view(kb: &Keyboard<Mock>, index: usize) -> myhub_core::HeProfileView {
+        kb.detail(true).keyboard.unwrap().he.unwrap().profiles[index].clone()
+    }
+
+    #[test]
+    fn travel_sends_the_exact_frames_once_and_updates_the_current_profile() {
+        let (mut kb, shared) = settings_keyboard(|_| {});
+        let op = travel(TravelModeArg::RapidTrigger, 2.2, 0.5, 0.6);
+        let result = run(&mut kb, true, op);
+        assert!(result.answer.is_ok() && result.changed && result.lost.is_none());
+        // A9 10, word, A9 14, word, A9 10 (profile check), A9 1F, word. Reads once each.
+        assert_eq!(
+            shared.borrow().frames,
+            vec![
+                [0xA9, 0x10, 0],
+                [0xA9, 0x12, 1],
+                [0xA9, 0x14, 1],
+                [0xA9, 0x12, 1],
+                [0xA9, 0x10, 0],
+                [0xA9, 0x1F, 1],
+                [0xA9, 0x12, 1],
+            ]
+        );
+        let p = profile_view(&kb, 1);
+        assert_eq!((p.actuation_mm, p.press_mm, p.release_mm), (2.2, 0.5, 0.6));
+        // Only the current profile changed.
+        assert_eq!(profile_view(&kb, 0).actuation_mm, 2.0);
+    }
+
+    #[test]
+    fn lighting_sends_the_changed_fields_then_saves_and_shows_the_stored_values() {
+        let (mut kb, shared) = settings_keyboard(|he| he.bright_delta = 1);
+        let op = KeyboardWrite::lighting(Some(4), Some(120), None, None, None).unwrap();
+        let result = run(&mut kb, true, op);
+        assert!(result.answer.is_ok() && result.changed);
+        let frames: Vec<[u8; 3]> = shared.borrow().frames.clone();
+        let writes: Vec<[u8; 3]> = frames
+            .iter()
+            .copied()
+            .filter(|f| matches!(f[0], 0x07 | 0x09))
+            .collect();
+        // Effect (id 2) first, then brightness (id 1), then the save.
+        assert_eq!(
+            writes,
+            vec![[0x07, 0x03, 2], [0x07, 0x03, 1], [0x09, 0x03, 0]]
+        );
+        // Four reads before, four after the writes, four after the save.
+        assert_eq!(frames.iter().filter(|f| f[0] == 0x08).count(), 12);
+        let light = kb.detail(true).keyboard.unwrap().lighting.unwrap();
+        // The keyboard stores brightness one lower than sent.
+        assert_eq!((light.effect, light.brightness), (4, 119));
+    }
+
+    #[test]
+    fn writes_off_send_nothing_for_travel_and_lighting() {
+        let (mut kb, shared) = settings_keyboard(|_| {});
+        let travel_op = travel(TravelModeArg::Static, 3.0, 0.0, 0.0);
+        let light_op = KeyboardWrite::lighting(None, None, Some(10), None, None).unwrap();
+        for op in [travel_op, light_op] {
+            assert_eq!(
+                run(&mut kb, false, op).answer.unwrap_err(),
+                "writesDisabled"
+            );
+        }
+        kb.mark_foreign(Instant::now());
+        assert_eq!(run(&mut kb, true, travel_op).answer.unwrap_err(), "busy");
+        let now = Instant::now();
+        let late = kb.write(light_op, true, now + Duration::from_secs(19), now);
+        assert_eq!(late.answer.unwrap_err(), "busy");
+        assert_eq!(shared.borrow().written, 0);
+    }
+
+    #[test]
+    fn a_short_deadline_refuses_with_budget_before_any_frame() {
+        let (mut kb, shared) = settings_keyboard(|_| {});
+        let light_op = KeyboardWrite::lighting(None, None, Some(10), None, None).unwrap();
+        let now = Instant::now();
+        let late = kb.write(light_op, true, now + Duration::from_secs(19), now);
+        assert_eq!(late.answer.unwrap_err(), "deviceError:budget");
+        assert_eq!(shared.borrow().written, 0);
+    }
+
+    #[test]
+    fn a_save_that_did_not_keep_the_value_answers_verify_failed_saved_and_re_reads() {
+        let corrupt = word(2, 30, 4, 4);
+        let (mut kb, shared) = settings_keyboard(|he| he.corrupt_on_save = Some(corrupt));
+        let result = run(
+            &mut kb,
+            true,
+            travel(TravelModeArg::RapidTrigger, 2.2, 0.5, 0.6),
+        );
+        assert_eq!(result.answer.unwrap_err(), "verifyFailed:saved");
+        assert!(result.changed && result.lost.is_none());
+        // The snapshot shows what the keyboard holds after the re-read.
+        assert_eq!(profile_view(&kb, 1).actuation_mm, 3.0);
+        assert_eq!(shared.borrow().frames.last(), Some(&[0xA9, 0x12, 1]));
+    }
+
+    #[test]
+    fn a_travel_write_that_times_out_is_not_resent_and_the_state_is_read_again() {
+        let (mut kb, shared) = settings_keyboard(|he| he.mute_travel = true);
+        let result = run(
+            &mut kb,
+            true,
+            travel(TravelModeArg::RapidTrigger, 2.2, 0.5, 0.6),
+        );
+        assert_eq!(result.answer.unwrap_err(), "deviceError:timeout");
+        assert!(result.lost.is_none());
+        let frames = shared.borrow().frames.clone();
+        assert_eq!(frames.iter().filter(|f| f[..2] == [0xA9, 0x14]).count(), 1);
+        // A9 10, word, the A9 14, then the re-read: A9 10 and the word.
+        assert_eq!(
+            frames,
+            vec![
+                [0xA9, 0x10, 0],
+                [0xA9, 0x12, 1],
+                [0xA9, 0x14, 1],
+                [0xA9, 0x10, 0],
+                [0xA9, 0x12, 1],
+            ]
+        );
+        assert_eq!(profile_view(&kb, 1).actuation_mm, 2.0);
+    }
+
+    #[test]
+    fn travel_and_lighting_values_are_range_checked_in_the_units_of_the_ui() {
+        use TravelModeArg::{RapidTrigger, Static};
+        let bad = |r: Result<KeyboardWrite, String>| r.unwrap_err();
+        assert!(KeyboardWrite::travel(1, Static, 0.2, 0.0, 0.0).is_ok());
+        assert!(KeyboardWrite::travel(1, RapidTrigger, 3.8, 0.1, 3.8).is_ok());
+        for actuation in [0.1, 3.9, f64::NAN] {
+            assert_eq!(
+                bad(KeyboardWrite::travel(1, Static, actuation, 0.5, 0.5)),
+                "outOfRange"
+            );
+        }
+        assert_eq!(
+            bad(KeyboardWrite::travel(1, RapidTrigger, 2.0, 0.0, 0.5)),
+            "outOfRange"
+        );
+        assert_eq!(
+            bad(KeyboardWrite::travel(1, RapidTrigger, 2.0, 0.5, 3.9)),
+            "outOfRange"
+        );
+        // 0.1 mm units, rounded.
+        let Ok(KeyboardWrite::Travel { settings: t, .. }) =
+            KeyboardWrite::travel(1, RapidTrigger, 2.04, 0.46, 0.5)
+        else {
+            panic!("valid")
+        };
+        assert_eq!((t.actuation, t.press, t.release), (20, 5, 5));
+        assert!(KeyboardWrite::lighting(Some(24), Some(255), Some(0), Some(0), Some(255)).is_ok());
+        for (e, b, s, h, sat) in [
+            (Some(25), None, None, None, None),
+            (Some(-1), None, None, None, None),
+            (None, Some(256), None, None, None),
+            (None, None, Some(-1), None, None),
+            (None, None, None, Some(10), None),
+            (None, None, None, None, Some(10)),
+            (None, None, None, Some(256), Some(0)),
+            (None, None, None, None, None),
+        ] {
+            assert_eq!(bad(KeyboardWrite::lighting(e, b, s, h, sat)), "outOfRange");
+        }
+    }
+
+    #[test]
+    fn a_travel_write_for_another_profile_is_refused_before_any_write_frame() {
+        let (mut kb, shared) = settings_keyboard(|_| {});
+        // The UI shows profile 0 as active, the keyboard is on 1.
+        let op = KeyboardWrite::travel(0, TravelModeArg::RapidTrigger, 2.2, 0.5, 0.6).unwrap();
+        let result = run(&mut kb, true, op);
+        assert_eq!(result.answer.unwrap_err(), "profileChanged");
+        let frames = shared.borrow().frames.clone();
+        assert!(
+            frames
+                .iter()
+                .all(|f| f[0] == 0xA9 && matches!(f[1], 0x10 | 0x12))
+        );
+        assert_eq!(frames[0], [0xA9, 0x10, 0]);
+        // Nothing was written; the cache still shows profile 1 as current.
+        assert_eq!(
+            kb.detail(true)
+                .keyboard
+                .unwrap()
+                .he
+                .unwrap()
+                .current_profile,
+            1
+        );
+    }
+
+    #[test]
+    fn values_already_held_send_no_write_and_no_save() {
+        let (mut kb, shared) = settings_keyboard(|_| {});
+        // The keyboard holds rapid trigger 2.0 / 0.4 / 0.4 and effect 6, brightness 200.
+        let same = travel(TravelModeArg::RapidTrigger, 2.0, 0.4, 0.4);
+        assert!(run(&mut kb, true, same).answer.is_ok());
+        let light = KeyboardWrite::lighting(Some(6), Some(200), None, None, None).unwrap();
+        assert!(run(&mut kb, true, light).answer.is_ok());
+        let frames = shared.borrow().frames.clone();
+        assert!(
+            frames
+                .iter()
+                .all(|f| !matches!((f[0], f[1]), (0xA9, 0x14 | 0x1F) | (0x07 | 0x09, _)))
+        );
     }
 }

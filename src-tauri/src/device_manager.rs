@@ -45,7 +45,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backup;
-use crate::keychron::{KEYBOARD_WRITE_WAIT, KeychronCommand, KeychronWorker};
+use crate::keychron::{KeyboardWrite, KeychronCommand, KeychronWorker, TravelModeArg};
 use crate::settings::{self, Language, Settings, SettingsState};
 use crate::sony::{SONY_WRITE_WAIT, SonyCommand, SonyWorker, SonyWrite};
 use crate::tray;
@@ -312,26 +312,38 @@ impl Router {
             .map(|()| answer)
     }
 
-    /// A keyboard profile selection: only the keyboard id reaches the keyboard worker,
-    /// every other id answers `notSupported`.
+    /// A keyboard write: only the keyboard id reaches the keyboard worker, every other id
+    /// answers `notSupported` (before the values are looked at); a value out of range
+    /// answers `outOfRange` without reaching the worker.
+    fn keyboard_write(
+        &self,
+        id: &str,
+        op: impl FnOnce() -> Result<KeyboardWrite, String>,
+    ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        if route_of(id) != Some(Slot::Keychron) {
+            return Some(refused_reply("notSupported"));
+        }
+        let op = match op() {
+            Ok(op) => op,
+            Err(code) => return Some(refused_reply(&code)),
+        };
+        let (reply, answer) = mpsc::channel();
+        self.keychron
+            .send(KeychronCommand::Write {
+                op,
+                deadline: Instant::now() + op.wait().saturating_sub(WRITE_DEADLINE_MARGIN),
+                reply,
+            })
+            .ok()
+            .map(|()| answer)
+    }
+
     fn keyboard_profile(
         &self,
         id: &str,
         profile: i64,
     ) -> Option<Receiver<Result<DeviceDetail, String>>> {
-        if route_of(id) != Some(Slot::Keychron) {
-            return Some(refused_reply("notSupported"));
-        }
-        let (reply, answer) = mpsc::channel();
-        self.keychron
-            .send(KeychronCommand::SelectProfile {
-                profile,
-                deadline: Instant::now()
-                    + KEYBOARD_WRITE_WAIT.saturating_sub(WRITE_DEADLINE_MARGIN),
-                reply,
-            })
-            .ok()
-            .map(|()| answer)
+        self.keyboard_write(id, || Ok(KeyboardWrite::Profile(profile)))
     }
 
     /// Tells every worker that the settings changed.
@@ -609,6 +621,39 @@ impl DeviceManager {
         profile: i64,
     ) -> Option<Receiver<Result<DeviceDetail, String>>> {
         self.router.keyboard_profile(id, profile)
+    }
+
+    /// Asks the keyboard worker to set the travel of the current HE profile (millimetres, as
+    /// sent by the UI) and save it. Any other id answers `notSupported`, a value out of range
+    /// `outOfRange`; `None` when the worker is gone.
+    pub fn request_keyboard_travel(
+        &self,
+        id: &str,
+        profile: i64,
+        mode: TravelModeArg,
+        actuation_mm: f64,
+        press_mm: f64,
+        release_mm: f64,
+    ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        self.router.keyboard_write(id, || {
+            KeyboardWrite::travel(profile, mode, actuation_mm, press_mm, release_mm)
+        })
+    }
+
+    /// Asks the keyboard worker to change the global lighting and save it. Same refusals as
+    /// [`DeviceManager::request_keyboard_travel`].
+    pub fn request_keyboard_lighting(
+        &self,
+        id: &str,
+        effect: Option<i64>,
+        brightness: Option<i64>,
+        speed: Option<i64>,
+        hue: Option<i64>,
+        saturation: Option<i64>,
+    ) -> Option<Receiver<Result<DeviceDetail, String>>> {
+        self.router.keyboard_write(id, || {
+            KeyboardWrite::lighting(effect, brightness, speed, hue, saturation)
+        })
     }
 
     /// Tells the workers that the settings changed, so they publish the detail
@@ -3646,8 +3691,53 @@ mod tests {
         );
         assert!(matches!(
             keychron_rx.try_recv(),
-            Ok(KeychronCommand::SelectProfile { profile: 2, .. })
+            Ok(KeychronCommand::Write {
+                op: KeyboardWrite::Profile(2),
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn keyboard_travel_and_lighting_reach_only_the_keyboard_worker() {
+        let (logitech, logitech_rx) = mpsc::channel();
+        let (sony, sony_rx) = mpsc::channel();
+        let (keychron, keychron_rx) = mpsc::channel();
+        let router = Router {
+            logitech,
+            sony,
+            keychron,
+        };
+        let travel = || KeyboardWrite::travel(1, TravelModeArg::Static, 2.0, 0.4, 0.4);
+        let light = || KeyboardWrite::lighting(Some(3), None, None, None, None);
+        for id in [DEVICE_ID, sony_wf_c710n::DEVICE_ID, "nope"] {
+            for op in [travel, light] {
+                let answer = router.keyboard_write(id, op).unwrap();
+                assert_eq!(answer.try_recv().unwrap().unwrap_err(), "notSupported");
+            }
+        }
+        assert!(logitech_rx.try_recv().is_err());
+        assert!(sony_rx.try_recv().is_err());
+        assert!(keychron_rx.try_recv().is_err());
+        // A value out of range is refused here, the worker never sees it.
+        let answer = router
+            .keyboard_write(keychron_k2he::DEVICE_ID, || {
+                KeyboardWrite::travel(1, TravelModeArg::Static, 9.0, 0.4, 0.4)
+            })
+            .unwrap();
+        assert_eq!(answer.try_recv().unwrap().unwrap_err(), "outOfRange");
+        assert!(keychron_rx.try_recv().is_err());
+        for op in [travel, light] {
+            assert!(
+                router
+                    .keyboard_write(keychron_k2he::DEVICE_ID, op)
+                    .is_some()
+            );
+            assert!(matches!(
+                keychron_rx.try_recv(),
+                Ok(KeychronCommand::Write { .. })
+            ));
+        }
     }
 
     fn keyboard_detail(connection: Connection, he: bool) -> DeviceDetail {

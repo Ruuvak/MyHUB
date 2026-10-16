@@ -2,8 +2,8 @@
 //!
 //! [`Session`] runs the `keychron-proto` protocol over any [`RawLink`]: one frame in
 //! flight, every frame from `Policy::check` -> `CheckedRequest::encode`, reads resent up
-//! to two times after a timeout, writes never resent. The stored policy is read-only; the
-//! only write is [`select_profile`], which opens one tier per call on a copy.
+//! to two times after a timeout (once inside a write sequence), writes never resent. The stored policy is read-only; the
+//! writes ([`select_profile`], [`set_travel_global`], [`set_lighting`]) open one tier per call on a copy.
 //! [`read_snapshot`] reads the whole keyboard state.
 //!
 //! Another configurator (the Keychron launcher) talking to the keyboard at the same time
@@ -38,7 +38,9 @@ pub use detail::{
 pub use discovery::{InterfaceInfo, list_interfaces, list_receiver_interfaces};
 pub use error::SessionError;
 pub use hid::HidapiLink;
-pub use light::{LightChange, LightOutcome, LightState, read_light_state, set_lighting};
+pub use light::{
+    LightChange, LightOutcome, LightState, read_light_state, set_lighting, set_lighting_with,
+};
 pub use link::{FRAME_LEN, LinkError, READ_BUF_LEN, REPORT_LEN, RawLink};
 pub use linkrx::{LinkSnapshot, read_link, read_link_state};
 pub use session::{
@@ -51,8 +53,13 @@ pub use snapshot::{
 };
 pub use travel::{
     DEFAULT_SENSITIVITY, TravelOutcome, TravelSettings, read_global_word, set_travel_global,
+    set_travel_global_with,
 };
-pub use writes::{SelectOutcome, read_profiles_info, select_profile};
+pub use writes::{SaveMode, SelectOutcome, read_profiles_info, select_profile};
+
+/// Re-exported for callers that build a [`TravelSettings`] or patch a cached global word.
+pub use keychron_proto::TravelMode;
+pub use keychron_proto::he::KeyWord;
 
 /// Stable device ID used by the UI and the app's per-device files.
 pub const DEVICE_ID: &str = "keychron-k2he";

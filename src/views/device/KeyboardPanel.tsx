@@ -1,12 +1,12 @@
 import { Clock, Keyboard, Lightbulb, Sliders } from "@phosphor-icons/react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { ReadOnlyNote } from "../../components/device/ReadOnlyNote";
 import { useUpdatedAgo } from "../../components/device/useUpdatedAgo";
 import { useT } from "../../i18n/useT";
-import { errorCode, keyboardErrorMessage } from "../../lib/deviceErrors";
 import { cx } from "../../lib/cx";
-import { refreshDevice, setKeyboardProfile } from "../../lib/ipc";
+import { setKeyboardProfile } from "../../lib/ipc";
 import {
+  activeHeProfile,
   brightnessPercent,
   effectKey,
   formatDuration,
@@ -21,7 +21,9 @@ import {
 } from "../../lib/keyboard";
 import type { DeviceDetail, HeProfileView, KeyboardView, KeymapLayerView, LightingView } from "../../lib/types";
 import { Badge, Panel, SegmentedControl } from "../../ui";
+import { HeEditor, LightingEditor } from "./KeyboardEditors";
 import { useKeyboardRefresh } from "./useKeyboardRefresh";
+import { useKeyboardWrite } from "./useKeyboardWrite";
 
 const MATRIX_ROWS = 6;
 const MATRIX_COLS = 16;
@@ -53,7 +55,7 @@ export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDe
         </Panel>
 
         {keyboard.he ? <HeCard detail={detail} keyboard={keyboard} onDetail={onDetail} /> : null}
-        {keyboard.lighting ? <LightingCard lighting={keyboard.lighting} /> : null}
+        {keyboard.lighting ? <LightingCard detail={detail} keyboard={keyboard} lighting={keyboard.lighting} onDetail={onDetail} /> : null}
         {keyboard.timers ? <TimersCard timers={keyboard.timers} /> : null}
         {keyboard.keymap && keyboard.keymap.length > 0 ? <KeymapCard keyboard={keyboard} keymap={keyboard.keymap} /> : null}
       </div>
@@ -96,46 +98,18 @@ function InfoRow({ label, value, mono }: { label: string; value: ReactNode; mono
 function HeCard({ detail, keyboard, onDetail }: { detail: DeviceDetail; keyboard: KeyboardView; onDetail: (next: DeviceDetail) => void }) {
   const t = useT();
   const he = keyboard.he;
+  const write = useKeyboardWrite(detail.id, onDetail);
   const [pending, setPending] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
   if (!he) return null;
   const selectable = !detail.readOnly && keyboard.configurable && !keyboard.otherConfigurator;
   // Writes are off but the keyboard could be configured: say what to turn on.
   const needsWrites = detail.readOnly && keyboard.configurable;
+  const active = activeHeProfile(keyboard);
 
   const select = (index: number) => {
-    if (pending !== null || index === he.currentProfile) return;
+    if (write.pending || index === he.currentProfile) return;
     setPending(index);
-    setError(null);
-    setKeyboardProfile(detail.id, index).then(
-      (next) => {
-        if (!alive.current) return;
-        setPending(null);
-        onDetail(next);
-      },
-      (e: unknown) => {
-        if (!alive.current) return;
-        setPending(null);
-        const { key, vars } = keyboardErrorMessage(e);
-        setError(t(key, vars));
-        // The state is unknown after a timeout: show what the keyboard has now.
-        if (errorCode(e) === "deviceError:timeout") {
-          refreshDevice(detail.id).then(
-            (next) => {
-              if (next && alive.current) onDetail(next);
-            },
-            () => {},
-          );
-        }
-      },
-    );
+    void write.run(() => setKeyboardProfile(detail.id, index)).then(() => setPending(null));
   };
 
   return (
@@ -148,13 +122,18 @@ function HeCard({ detail, keyboard, onDetail }: { detail: DeviceDetail; keyboard
               active={profile.index === he.currentProfile}
               onSelect={selectable ? () => select(profile.index) : undefined}
               pending={pending === profile.index}
-              locked={pending !== null}
+              locked={write.pending}
             />
           </li>
         ))}
-        {error ? (
+        {selectable && active ? (
+          <li>
+            <HeEditor key={active.index} detail={detail} profile={active} write={write} />
+          </li>
+        ) : null}
+        {write.error ? (
           <li role="alert" className="text-sm text-danger">
-            {error}
+            {write.error}
           </li>
         ) : null}
         {needsWrites ? (
@@ -259,8 +238,17 @@ export function EffectName({ effect }: { effect: number }) {
   return <>{key ? t(key) : t("keyboard.light.effectN", { n: effect })}</>;
 }
 
-function LightingCard({ lighting }: { lighting: LightingView }) {
+function LightingCard({ detail, keyboard, lighting, onDetail }: { detail: DeviceDetail; keyboard: KeyboardView; lighting: LightingView; onDetail: (next: DeviceDetail) => void }) {
   const t = useT();
+  const write = useKeyboardWrite(detail.id, onDetail);
+  const editable = !detail.readOnly && keyboard.configurable && !keyboard.otherConfigurator;
+  if (editable) {
+    return (
+      <Panel title={t("keyboard.light.title")} icon={<Lightbulb size={18} weight="regular" aria-hidden="true" />}>
+        <LightingEditor detail={detail} lighting={lighting} write={write} />
+      </Panel>
+    );
+  }
   return (
     <Panel title={t("keyboard.light.title")} icon={<Lightbulb size={18} weight="regular" aria-hidden="true" />}>
       <div className="px-4 pb-4">
