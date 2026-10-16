@@ -55,6 +55,22 @@ pub enum SessionError {
     /// flash was already written (A9 1F acknowledged) before the mismatch.
     #[error("profile read back is {got}, expected {expected} (flash written: {saved})")]
     VerifyFailed { expected: u8, got: u8, saved: bool },
+    /// The current profile changed on the keyboard between the travel write and the save,
+    /// so A9 1F was not sent. The RAM copy of the original profile (`expected`) was
+    /// changed but NOT saved; the keyboard now shows profile `got`.
+    #[error(
+        "current profile changed from {expected} to {got} before the save; the RAM copy of profile {expected} was changed but not saved"
+    )]
+    ProfileChanged { expected: u8, got: u8 },
+    /// A value read back after a travel or lighting write differs from what was written.
+    /// `saved` is true when flash was already written before the mismatch.
+    #[error("{what} read back as {got}, expected {expected} (flash written: {saved})")]
+    VerifyMismatch {
+        what: &'static str,
+        expected: String,
+        got: String,
+        saved: bool,
+    },
     /// The keyboard answered a write with a nonzero status byte.
     #[error("keyboard answered {command:#04x} {sub:#04x} with status {status}")]
     DeviceStatus { command: u8, sub: u8, status: u8 },

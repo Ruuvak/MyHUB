@@ -23,10 +23,12 @@ mod detail;
 mod discovery;
 mod error;
 mod hid;
+mod light;
 mod link;
 mod linkrx;
 mod session;
 mod snapshot;
+mod travel;
 mod writes;
 
 pub use cache::{KeyboardCache, cache_path};
@@ -36,6 +38,7 @@ pub use detail::{
 pub use discovery::{InterfaceInfo, list_interfaces, list_receiver_interfaces};
 pub use error::SessionError;
 pub use hid::HidapiLink;
+pub use light::{LightChange, LightOutcome, LightState, read_light_state, set_lighting};
 pub use link::{FRAME_LEN, LinkError, READ_BUF_LEN, REPORT_LEN, RawLink};
 pub use linkrx::{LinkSnapshot, read_link, read_link_state};
 pub use session::{
@@ -45,6 +48,9 @@ pub use session::{
 pub use snapshot::{
     LightSettings, Lighting, RegionSlots, SectionNote, Snapshot, VIA_PROTOCOL, read_snapshot,
     refresh_state,
+};
+pub use travel::{
+    DEFAULT_SENSITIVITY, TravelOutcome, TravelSettings, read_global_word, set_travel_global,
 };
 pub use writes::{SelectOutcome, read_profiles_info, select_profile};
 

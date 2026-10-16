@@ -1,12 +1,28 @@
-//! Probe for the Keychron K2 HE over USB raw HID. Read-only except `set profile`.
+//! Probe for the Keychron K2 HE over USB raw HID. Read-only except the `set` commands.
 //!
 //! Usage:
 //! `kc_probe list`
 //! `kc_probe state [--json] [--trace]`
 //! `kc_probe watch <seconds>`
 //! `kc_probe profile`
+//! `kc_probe travel`
 //! `kc_probe set profile <1..3> [--save]`
+//! `kc_probe set travel --mode static|rt --actuation <mm> [--press <mm>] [--release <mm>] [--save]`
+//! `kc_probe set light [--effect N] [--brightness 0..255] [--speed 0..255] [--hue 0..255 --sat 0..255] [--save]`
 //! `kc_probe link [--trace]`
+//!
+//! * `travel`: read only. Prints the CURRENT profile's global mode, actuation and (for
+//!   rapid trigger) press and release in mm. Sends A9 10 and one A9 12.
+//! * `set travel`: edits the global travel word of the CURRENT profile only (A9 14, RAM).
+//!   Millimetres with one decimal (0.1 mm steps): actuation 0.2..3.8, press and release
+//!   0.1..3.8; checked before the keyboard is opened. `static` keeps the profile's stored
+//!   press and release (`--press`/`--release` are ignored with a note); `rt` takes them
+//!   from the flags, or from the current value when a flag is absent. Prints before,
+//!   after, saved and frames written. Nothing is sent when the values already hold and
+//!   `--save` is absent. `--save` also sends A9 1F, which WRITES FLASH.
+//! * `set light`: VIA 07 03 per changed field (RAM), in the order effect, brightness,
+//!   speed, colour; effect 0..24; `--hue` and `--sat` go together. Prints before, after,
+//!   saved and frames written. `--save` also sends VIA 09 03, which WRITES FLASH.
 //!
 //! * `list`: the HID interfaces with the keyboard's VID and PID, then those of the
 //!   Keychron Link receiver (PID 0xD030): interface number, usage page, usage, product
@@ -34,9 +50,11 @@
 //! else. Likewise after any other error that follows a write (ambiguous reply, foreign
 //! traffic, bad report, link error).
 //!
-//! What it sends: `list`, `state`, `watch` and `profile` send only Read-tier requests
-//! (the stored session policy is read-only). `set profile` also sends A9 11, and A9 1F
-//! with `--save`, each through a policy that opens only that tier for that call. It
+//! What it sends: `list`, `state`, `watch`, `profile` and `travel` send only Read-tier
+//! requests (the stored session policy is read-only). `set profile` also sends A9 11,
+//! `set travel` A9 14, `set light` VIA 07 03, and with `--save` A9 1F or VIA 09 03, each
+//! through a policy that opens only that tier for that call. A write that fails to read
+//! back as written (or times out) leaves the state unknown: run `travel` or `state`. It
 //! stops with an error and sends nothing more when it sees foreign traffic (the launcher
 //! is open); close the launcher first.
 //!
@@ -46,19 +64,104 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use keychron_k2he::{
-    DISPLAY_NAME, FrameDirection, Incoming, InterfaceInfo, LINK_PID, LinkSnapshot, Session,
-    SessionError, Snapshot, list_interfaces, list_receiver_interfaces, read_link,
-    read_profiles_info, read_snapshot, select_profile,
+    DEFAULT_SENSITIVITY, DISPLAY_NAME, FrameDirection, Incoming, InterfaceInfo, LINK_PID,
+    LightChange, LightState, LinkSnapshot, Session, SessionError, Snapshot, TravelSettings,
+    list_interfaces, list_receiver_interfaces, read_global_word, read_link, read_profiles_info,
+    read_snapshot, select_profile, set_lighting, set_travel_global,
 };
+use keychron_proto::TravelMode;
 use keychron_proto::he::{KeyMode, KeyWord};
+use keychron_proto::request::{ACTUATION_RANGE, EFFECT_MAX, SENSITIVITY_RANGE};
 
 enum Command {
     List,
-    Link { trace: bool },
-    State { json: bool, trace: bool },
+    Link {
+        trace: bool,
+    },
+    State {
+        json: bool,
+        trace: bool,
+    },
     Watch(u64),
     Profile,
-    SetProfile { profile: u8, save: bool },
+    Travel,
+    SetProfile {
+        profile: u8,
+        save: bool,
+    },
+    SetTravel {
+        mode: TravelMode,
+        actuation: u8,
+        press: Option<u8>,
+        release: Option<u8>,
+        save: bool,
+    },
+    SetLight {
+        change: LightChange,
+        save: bool,
+    },
+}
+
+/// Millimetres with at most one decimal to 0.1 mm units, within `(min, max)`.
+fn parse_mm(text: &str, (min, max): (u8, u8)) -> Option<u8> {
+    let v: f64 = text.parse().ok().filter(|v: &f64| v.is_finite())?;
+    let tenths = (v * 10.0).round();
+    if (v * 10.0 - tenths).abs() > 1e-6 || tenths < f64::from(min) || tenths > f64::from(max) {
+        return None;
+    }
+    Some(tenths as u8)
+}
+
+fn parse_set_travel(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    let (mut mode, mut actuation, mut press, mut release, mut save) =
+        (None, None, None, None, false);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--save" => save = true,
+            "--mode" => {
+                mode = Some(match args.next()?.as_str() {
+                    "static" => TravelMode::Static,
+                    "rt" => TravelMode::RapidTrigger,
+                    _ => return None,
+                })
+            }
+            "--actuation" => actuation = Some(parse_mm(&args.next()?, ACTUATION_RANGE)?),
+            "--press" => press = Some(parse_mm(&args.next()?, SENSITIVITY_RANGE)?),
+            "--release" => release = Some(parse_mm(&args.next()?, SENSITIVITY_RANGE)?),
+            _ => return None,
+        }
+    }
+    Some(Command::SetTravel {
+        mode: mode?,
+        actuation: actuation?,
+        press,
+        release,
+        save,
+    })
+}
+
+fn parse_set_light(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    let mut change = LightChange::default();
+    let (mut hue, mut sat, mut save) = (None, None, false);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--save" => save = true,
+            "--effect" => {
+                change.effect = Some(args.next()?.parse().ok().filter(|&e| e <= EFFECT_MAX)?)
+            }
+            "--brightness" => change.brightness = Some(args.next()?.parse().ok()?),
+            "--speed" => change.speed = Some(args.next()?.parse().ok()?),
+            "--hue" => hue = Some(args.next()?.parse().ok()?),
+            "--sat" => sat = Some(args.next()?.parse().ok()?),
+            _ => return None,
+        }
+    }
+    change.color = match (hue, sat) {
+        (None, None) => None,
+        (Some(h), Some(s)) => Some((h, s)),
+        _ => return None,
+    };
+    Some(Command::SetLight { change, save })
 }
 
 fn parse_args() -> Option<Command> {
@@ -91,9 +194,13 @@ fn parse_args() -> Option<Command> {
             args.next().is_none().then_some(Command::Watch(seconds))
         }
         "profile" => args.next().is_none().then_some(Command::Profile),
+        "travel" => args.next().is_none().then_some(Command::Travel),
         "set" => {
-            if args.next()?.as_str() != "profile" {
-                return None;
+            match args.next()?.as_str() {
+                "profile" => {}
+                "travel" => return parse_set_travel(args),
+                "light" => return parse_set_light(args),
+                _ => return None,
             }
             let number: u8 = args.next()?.parse().ok()?;
             let save = match args.next().as_deref() {
@@ -141,7 +248,7 @@ fn exit_for(e: &SessionError) -> ExitCode {
 fn main() -> ExitCode {
     let Some(command) = parse_args() else {
         eprintln!(
-            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | set profile <1..3> [--save] | link [--trace]"
+            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | travel | set profile <1..3> [--save] | set travel --mode static|rt --actuation <mm> [--press <mm>] [--release <mm>] [--save] | set light [--effect 0..24] [--brightness 0..255] [--speed 0..255] [--hue 0..255 --sat 0..255] [--save] | link [--trace]"
         );
         return ExitCode::from(2);
     };
@@ -151,7 +258,19 @@ fn main() -> ExitCode {
         Command::State { json, trace: t } => run(|s| state(s, json), t),
         Command::Watch(seconds) => run(|s| watch(s, seconds), false),
         Command::Profile => run(current_profile, false),
+        Command::Travel => run(travel, false),
         Command::SetProfile { profile, save } => run(|s| set_profile(s, profile, save), false),
+        Command::SetTravel {
+            mode,
+            actuation,
+            press,
+            release,
+            save,
+        } => run(
+            |s| set_travel(s, mode, actuation, press, release, save),
+            false,
+        ),
+        Command::SetLight { change, save } => run(|s| set_light(s, change, save), false),
     }
 }
 
@@ -318,6 +437,101 @@ fn set_profile(
         out.frames_written,
         if out.unchanged {
             " (already current, nothing written)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn travel(session: &mut Session<keychron_k2he::HidapiLink>) -> Result<(), SessionError> {
+    let profile = read_profiles_info(session)?.current;
+    let w = read_global_word(session, profile)?;
+    println!("profile {}: {}", u16::from(profile) + 1, word(&w));
+    Ok(())
+}
+
+fn set_travel(
+    session: &mut Session<keychron_k2he::HidapiLink>,
+    mode: TravelMode,
+    actuation: u8,
+    press: Option<u8>,
+    release: Option<u8>,
+    save: bool,
+) -> Result<(), SessionError> {
+    let (press, release) = match mode {
+        TravelMode::Static => {
+            if press.is_some() || release.is_some() {
+                println!("note: --press and --release are ignored in static mode");
+            }
+            // Ignored by the device layer in Static; the stored values stay.
+            (SENSITIVITY_RANGE.0, SENSITIVITY_RANGE.0)
+        }
+        TravelMode::RapidTrigger => match (press, release) {
+            (Some(p), Some(r)) => (p, r),
+            _ => {
+                // A missing value keeps what the profile has now (read only).
+                let profile = read_profiles_info(session)?.current;
+                let w = read_global_word(session, profile)?;
+                let keep = |given: Option<u8>, stored: u8| {
+                    given.unwrap_or(if (SENSITIVITY_RANGE.0..=SENSITIVITY_RANGE.1).contains(&stored)
+                    {
+                        stored
+                    } else {
+                        println!(
+                            "note: stored value {stored} is outside 1..=38, using the default {DEFAULT_SENSITIVITY} (0.4 mm)"
+                        );
+                        DEFAULT_SENSITIVITY
+                    })
+                };
+                (keep(press, w.press), keep(release, w.release))
+            }
+        },
+    };
+    let settings = TravelSettings {
+        mode,
+        actuation,
+        press,
+        release,
+    };
+    let out = set_travel_global(session, settings, save)?;
+    println!("profile {} (current)", u16::from(out.profile) + 1);
+    println!("before: {}", word(&out.before));
+    println!("after:  {}", word(&out.after));
+    println!(
+        "saved {}, frames written {}{}",
+        out.saved,
+        out.frames_written,
+        if out.unchanged {
+            " (already set, nothing written)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn light_line(l: &LightState) -> String {
+    format!(
+        "effect {}, brightness {}, speed {}, hue {}, saturation {}",
+        l.effect, l.brightness, l.speed, l.hue, l.saturation
+    )
+}
+
+fn set_light(
+    session: &mut Session<keychron_k2he::HidapiLink>,
+    change: LightChange,
+    save: bool,
+) -> Result<(), SessionError> {
+    let out = set_lighting(session, change, save)?;
+    println!("before: {}", light_line(&out.before));
+    println!("after:  {}", light_line(&out.after));
+    println!(
+        "saved {}, frames written {}{}",
+        out.saved,
+        out.frames_written,
+        if out.unchanged {
+            " (already set, nothing written)"
         } else {
             ""
         }
