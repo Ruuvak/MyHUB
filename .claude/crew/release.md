@@ -21,7 +21,7 @@ Wersja: SemVer, źródłem jest `package.json`. Workspace w głównym `Cargo.tom
 7. Pobierz i przetestuj instalatory z wersji roboczej.
 8. Opublikuj draft. Dopiero wtedy `latest.json` staje się dostępny i zainstalowane kopie zobaczą aktualizację.
 
-Workflow można też uruchomić ręcznie (`workflow_dispatch`).
+Ręczne uruchomienie (`gh workflow run release.yml --ref main`) tylko buduje, bez tagu i bez release. Paczki trafiają do artefaktów runu (`myhub-ubuntu-22.04`, `myhub-windows-latest`), pobierasz je przez `gh run download <id>`. Do testu na Kubuntu repo nie musi być publiczne.
 
 ## Lokalna budowa na Windows
 
