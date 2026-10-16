@@ -2313,8 +2313,10 @@ dependencies = [
 name = "myhub-rfcomm"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
