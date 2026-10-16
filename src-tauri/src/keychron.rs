@@ -2,24 +2,33 @@
 //! next to the other devices. Read only in this slice.
 //!
 //! Discovery does not talk to the keyboard: the worker enumerates HID interfaces every
-//! 2 s while the keyboard is not connected. When the raw HID interface shows up it opens
-//! it and reads the whole snapshot once. Until that read succeeds the device is absent
-//! from the list (same as the headset).
+//! 2 s while the keyboard is not connected. USB has priority. When the keyboard's raw HID
+//! interface shows up it opens it and reads the whole snapshot once (and caches it, see
+//! below). Until that read succeeds the device is absent from the list (same as the
+//! headset).
 //!
-//! While connected the worker sends nothing by itself: the Keychron launcher may use
-//! the same interface and frames carry no sequence number, so a reply cannot be told from
-//! the launcher's reply. It only listens (`Session::poll`) and re-enumerates every 2 s to
-//! notice an unplug. A `refresh_device` re-reads the current profile and the lighting
-//! values (Read tier); profile changes made on the keyboard are not pushed, so the UI
-//! asks for a refresh when the panel opens.
+//! While connected over USB the worker sends nothing by itself: the Keychron launcher may
+//! use the same interface and frames carry no sequence number, so a reply cannot be told
+//! from the launcher's reply. It only listens (`Session::poll`) and re-enumerates every
+//! 2 s to notice an unplug. A `refresh_device` re-reads the current profile and the
+//! lighting values (Read tier); profile changes made on the keyboard are not pushed, so
+//! the UI asks for a refresh when the panel opens.
+//!
+//! Without the cable, when the Keychron Link receiver's raw HID interface is listed, the
+//! worker opens a receiver session, reads B1..B3 once and then B2 (the link state) every
+//! [`LINK_POLL`]. A linked K2 HE is shown as connected through the receiver with the
+//! settings of the last USB read (the cache file `cache/keychron-k2he.json` in the app
+//! config dir, written after every USB read); a keyboard frame is never sent over the
+//! receiver. Plugging the cable in closes the receiver session and switches to USB.
 //!
 //! An unrequested report that is not a known event, or a failed request because of one,
-//! means another program talks to the keyboard: the detail gets `otherConfigurator`, the
-//! worker sends nothing and goes on listening, and reads the whole snapshot again only
-//! after [`FOREIGN_QUIET`] without a foreign report. No serial number and no device path
-//! is logged: this module never prints one.
+//! means another program talks to the keyboard (or the receiver): the detail gets
+//! `otherConfigurator`, the worker sends nothing and goes on listening, and reads again
+//! only after [`FOREIGN_QUIET`] without a foreign report. No serial number and no device
+//! path is logged: this module never prints one.
 
 use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -27,8 +36,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keychron_k2he::{
-    DEVICE_ID, Incoming, RawLink, Session, SessionError, Snapshot, list_interfaces, read_snapshot,
-    refresh_state, to_detail,
+    DEVICE_ID, Incoming, KeyboardCache, LinkSnapshot, RawLink, Session, SessionError, Snapshot,
+    cache_of, cache_path, list_interfaces, list_receiver_interfaces, read_link, read_link_state,
+    read_snapshot, refresh_state, to_detail, to_receiver_detail,
 };
 use myhub_core::{Connection, DeviceDetail};
 use tauri::Manager;
@@ -46,6 +56,8 @@ const FOREIGN_CONNECT_WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(200);
 /// No foreign report for this long before the worker sends anything again.
 pub const FOREIGN_QUIET: Duration = Duration::from_secs(10);
+/// Gap between two B2 reads over the receiver.
+pub const LINK_POLL: Duration = Duration::from_secs(5);
 
 /// What the keyboard worker accepts.
 pub enum KeychronCommand {
@@ -151,9 +163,112 @@ impl<L: RawLink> Keyboard<L> {
     }
 }
 
+/// An open receiver session: the link state of the keyboard behind the Keychron Link
+/// receiver. Only B2 is ever sent after the first read; generic over the link for tests.
+struct Link<L: RawLink> {
+    session: Session<L>,
+    /// B3 of the first read.
+    firmware: Option<String>,
+    /// B2 says the linked device is a connected K2 HE.
+    linked: bool,
+    /// When foreign traffic was last seen; `Some` means nothing is sent.
+    last_foreign: Option<Instant>,
+    /// When B2 is read next.
+    next_read: Instant,
+    /// The last B2 read failed for a reason that is not foreign traffic (logged once).
+    read_failing: bool,
+}
+
+impl<L: RawLink> Link<L> {
+    fn new(session: Session<L>, first: &LinkSnapshot, now: Instant) -> Self {
+        Self {
+            session,
+            firmware: first.firmware.clone(),
+            linked: first.state.is_k2he(),
+            last_foreign: None,
+            next_read: now + LINK_POLL,
+            read_failing: false,
+        }
+    }
+
+    fn other_configurator(&self) -> bool {
+        self.last_foreign.is_some()
+    }
+
+    fn detail(&self, cache: Option<&KeyboardCache>, connected: bool) -> DeviceDetail {
+        to_receiver_detail(
+            cache,
+            self.firmware.clone(),
+            connected,
+            self.other_configurator(),
+        )
+    }
+
+    fn mark_foreign(&mut self, now: Instant) -> bool {
+        self.last_foreign.replace(now).is_none()
+    }
+
+    /// A failed read or listen, as for the USB session.
+    fn failed(&mut self, error: &SessionError, now: Instant) -> Result<bool, String> {
+        match error {
+            SessionError::ForeignTraffic
+            | SessionError::BackingOff { .. }
+            | SessionError::BadReport(_) => Ok(self.mark_foreign(now)),
+            SessionError::Link(_) => Err(error.to_string()),
+            other => {
+                if !self.read_failing {
+                    eprintln!("myhub: keyboard link read failed: {other}");
+                    self.read_failing = true;
+                }
+                if self.last_foreign.is_some() {
+                    self.last_foreign = Some(now);
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// One pass of the serving loop: B2 when due or asked for (and nobody else is
+    /// talking), then one listen of up to `listen`. `Ok(true)` when the detail changed,
+    /// `Err` with the reason when the link is gone. Nothing but B2 is ever written.
+    fn step(&mut self, now: Instant, refresh: bool, listen: Duration) -> Result<bool, String> {
+        let mut changed = false;
+        // While another program talks nothing is sent; once it was quiet for
+        // FOREIGN_QUIET one B2 read is tried and the flag clears when it succeeds.
+        let quiet = self
+            .last_foreign
+            .is_some_and(|last| now.saturating_duration_since(last) >= FOREIGN_QUIET);
+        if (refresh || now >= self.next_read) && (quiet || !self.other_configurator()) {
+            self.next_read = now + LINK_POLL;
+            match read_link_state(&mut self.session) {
+                Ok(state) => {
+                    self.read_failing = false;
+                    let linked = state.is_k2he();
+                    changed |= linked != self.linked || self.last_foreign.take().is_some();
+                    self.linked = linked;
+                }
+                Err(e) => changed |= self.failed(&e, now)?,
+            }
+        }
+        match self.session.poll(listen) {
+            Ok(Some(Incoming::Foreign(_))) => changed |= self.mark_foreign(now),
+            Ok(_) => {}
+            Err(e) => changed |= self.failed(&e, now)?,
+        }
+        // The receiver sends no keyboard events.
+        drop(self.session.drain_events());
+        Ok(changed)
+    }
+}
+
 /// True while the keyboard's raw HID interface is listed. Only enumerates.
 fn present() -> bool {
     list_interfaces().is_ok_and(|found| found.iter().any(|i| i.matched))
+}
+
+/// True while the receiver's raw HID interface is listed. Only enumerates.
+fn receiver_present() -> bool {
+    list_receiver_interfaces().is_ok_and(|found| found.iter().any(|i| i.matched))
 }
 
 /// Why no session could be opened.
@@ -171,11 +286,20 @@ enum Outcome {
     Lost(String),
 }
 
+/// How a receiver session ended.
+enum ReceiverEnd {
+    Stopped,
+    /// Scan again after this pause.
+    Retry(Duration),
+}
+
 pub struct KeychronWorker {
     pub app: tauri::AppHandle,
     pub state: Arc<Mutex<ManagerState>>,
     pub commands: Receiver<KeychronCommand>,
     pub shutdown: Arc<AtomicBool>,
+    /// App config dir; the cache of the last USB read lives under it.
+    pub config_dir: Option<PathBuf>,
 }
 
 impl KeychronWorker {
@@ -190,6 +314,7 @@ impl KeychronWorker {
                 detail.read_only = true;
                 if let Some(keyboard) = detail.keyboard.as_mut() {
                     keyboard.other_configurator = false;
+                    keyboard.configurable = false;
                 }
                 self.publish(detail, false);
             }
@@ -213,15 +338,29 @@ impl KeychronWorker {
 
     fn run_loop(&mut self) {
         let mut last_error: Option<String> = None;
+        let mut cache = self
+            .config_dir
+            .as_deref()
+            .and_then(|dir| KeyboardCache::load(&cache_path(dir)));
         while !self.stopping() {
             let mut pause = SCAN_INTERVAL;
+            // USB has priority: the receiver is only looked at while the cable is out.
+            if !present() && receiver_present() {
+                match self.serve_receiver(cache.as_ref(), &mut last_error) {
+                    ReceiverEnd::Stopped => return,
+                    ReceiverEnd::Retry(wait) => pause = wait,
+                }
+                self.wait(pause);
+                continue;
+            }
             match self.connect() {
                 Ok(mut keyboard) => {
                     last_error = None;
                     eprintln!("myhub: keyboard connected");
                     let mut stamp = clock_ms();
+                    self.store_cache(&mut cache, &keyboard.snapshot);
                     self.publish(self.stamped(&keyboard, true, stamp), true);
-                    let outcome = self.serve(&mut keyboard, &mut stamp);
+                    let outcome = self.serve(&mut keyboard, &mut stamp, &mut cache);
                     // Closes the interface.
                     match outcome {
                         Outcome::Stopped => return,
@@ -250,6 +389,18 @@ impl KeychronWorker {
         }
     }
 
+    /// Keeps the snapshot as the cache of the last USB read, in memory and on disk
+    /// (atomic write; a failure logs one line without the path and is otherwise ignored).
+    fn store_cache(&self, cache: &mut Option<KeyboardCache>, snapshot: &Snapshot) {
+        let fresh = cache_of(snapshot, clock_ms());
+        if let Some(dir) = self.config_dir.as_deref()
+            && let Err(e) = fresh.save(&cache_path(dir))
+        {
+            eprintln!("myhub: keyboard cache not written: {:?}", e.kind());
+        }
+        *cache = Some(fresh);
+    }
+
     /// Looks for the interface, opens it and reads the snapshot.
     fn connect(&self) -> Result<Keyboard<keychron_k2he::HidapiLink>, ConnectError> {
         if !present() {
@@ -273,6 +424,7 @@ impl KeychronWorker {
         &self,
         keyboard: &mut Keyboard<keychron_k2he::HidapiLink>,
         stamp: &mut u64,
+        cache: &mut Option<KeyboardCache>,
     ) -> Outcome {
         let mut next_scan = Instant::now() + SCAN_INTERVAL;
         while !self.stopping() {
@@ -290,6 +442,9 @@ impl KeychronWorker {
                 Ok(changed) => {
                     if changed {
                         *stamp = clock_ms();
+                        if !keyboard.other_configurator() {
+                            self.store_cache(cache, &keyboard.snapshot);
+                        }
                     }
                     dirty |= changed;
                 }
@@ -317,6 +472,148 @@ impl KeychronWorker {
         Outcome::Stopped
     }
 
+    /// The keyboard through the receiver: opens the receiver session, reads B1..B3 once
+    /// and then B2 every [`LINK_POLL`], until shutdown, a lost link, or the cable showing
+    /// up (the session is closed on return either way).
+    fn serve_receiver(
+        &self,
+        cache: Option<&KeyboardCache>,
+        last_error: &mut Option<String>,
+    ) -> ReceiverEnd {
+        let mut session = match Session::open_receiver() {
+            Ok(session) => session,
+            Err(SessionError::ReceiverNotFound) => return ReceiverEnd::Retry(SCAN_INTERVAL),
+            Err(other) => return self.receiver_failed(other.to_string(), last_error),
+        };
+        let first = match read_link(&mut session) {
+            Ok(first) => first,
+            Err(
+                SessionError::ForeignTraffic
+                | SessionError::BackingOff { .. }
+                | SessionError::BadReport(_),
+            ) => {
+                let message = "receiver busy: another program is talking to it".to_owned();
+                if last_error.as_deref() != Some(message.as_str()) {
+                    eprintln!("myhub: {message}");
+                    *last_error = Some(message);
+                }
+                return ReceiverEnd::Retry(FOREIGN_CONNECT_WAIT);
+            }
+            Err(other) => return self.receiver_failed(other.to_string(), last_error),
+        };
+        *last_error = None;
+        let mut link = Link::new(session, &first, Instant::now());
+        eprintln!("myhub: keyboard receiver opened, linked: {}", link.linked);
+        let mut stamp = clock_ms();
+        if let Some(detail) = self.receiver_detail(&link, cache, stamp) {
+            self.publish(detail, true);
+        }
+        let mut next_scan = Instant::now() + SCAN_INTERVAL;
+        while !self.stopping() {
+            let mut replies = Vec::new();
+            let mut dirty = false;
+            while let Ok(command) = self.commands.try_recv() {
+                match command {
+                    KeychronCommand::Refresh { reply } => replies.push(reply),
+                    KeychronCommand::SettingsChanged => dirty = true,
+                    KeychronCommand::Wake => {}
+                }
+            }
+            let now = Instant::now();
+            match link.step(now, !replies.is_empty(), POLL) {
+                Ok(changed) => {
+                    if changed {
+                        stamp = clock_ms();
+                    }
+                    dirty |= changed;
+                }
+                Err(reason) => {
+                    eprintln!("myhub: keyboard receiver lost: {reason}");
+                    stamp = clock_ms();
+                    answer_all(replies, self.mark_gone(&link, cache, stamp));
+                    return ReceiverEnd::Retry(SCAN_INTERVAL);
+                }
+            }
+            if now >= next_scan {
+                next_scan = now + SCAN_INTERVAL;
+                if present() {
+                    // The cable is in: USB takes over, the caller opens it right away.
+                    answer_all(replies, lock(&self.state).find(DEVICE_ID));
+                    return ReceiverEnd::Retry(Duration::ZERO);
+                }
+                if !receiver_present() {
+                    eprintln!("myhub: keyboard receiver unplugged");
+                    stamp = clock_ms();
+                    answer_all(replies, self.mark_gone(&link, cache, stamp));
+                    return ReceiverEnd::Retry(SCAN_INTERVAL);
+                }
+            }
+            if dirty || !replies.is_empty() {
+                let detail = self.receiver_detail(&link, cache, stamp);
+                if let Some(detail) = &detail {
+                    self.publish(detail.clone(), !replies.is_empty());
+                }
+                answer_all(replies, detail);
+            }
+        }
+        ReceiverEnd::Stopped
+    }
+
+    fn receiver_failed(&self, message: String, last_error: &mut Option<String>) -> ReceiverEnd {
+        if last_error.as_deref() != Some(message.as_str()) {
+            eprintln!("myhub: keyboard receiver not usable: {message}");
+            *last_error = Some(message);
+        }
+        self.mark_disconnected();
+        ReceiverEnd::Retry(SCAN_INTERVAL)
+    }
+
+    /// The detail for the receiver state: connected when B2 says a K2 HE is linked,
+    /// disconnected when it is not but the keyboard was published before, otherwise
+    /// `None` (it stays absent).
+    fn receiver_detail<L: RawLink>(
+        &self,
+        link: &Link<L>,
+        cache: Option<&KeyboardCache>,
+        at_ms: u64,
+    ) -> Option<DeviceDetail> {
+        if !link.linked && lock(&self.state).find(DEVICE_ID).is_none() {
+            return None;
+        }
+        Some(self.finish(link.detail(cache, link.linked), link.linked, at_ms))
+    }
+
+    /// The receiver is gone: publish the keyboard as disconnected if it was shown.
+    fn mark_gone<L: RawLink>(
+        &self,
+        link: &Link<L>,
+        cache: Option<&KeyboardCache>,
+        at_ms: u64,
+    ) -> Option<DeviceDetail> {
+        lock(&self.state).find(DEVICE_ID)?;
+        let detail = self.finish(link.detail(cache, false), false, at_ms);
+        self.publish(detail.clone(), false);
+        Some(detail)
+    }
+
+    /// A receiver that cannot be used: a published, connected keyboard goes to
+    /// disconnected (its last values stay).
+    fn mark_disconnected(&self) {
+        let cached = lock(&self.state).find(DEVICE_ID);
+        if let Some(mut detail) = cached
+            && detail.summary.connection == Connection::Connected
+        {
+            detail.summary.connection = Connection::Disconnected;
+            detail.read_only = true;
+            detail.updated_at_ms = clock_ms();
+            if let Some(keyboard) = detail.keyboard.as_mut() {
+                keyboard.other_configurator = false;
+                keyboard.configurable = false;
+            }
+            self.publish(detail, false);
+        }
+    }
+
     fn writes_allowed(&self) -> bool {
         self.app
             .try_state::<SettingsState>()
@@ -330,7 +627,10 @@ impl KeychronWorker {
         connected: bool,
         at_ms: u64,
     ) -> DeviceDetail {
-        let mut detail = keyboard.detail(connected);
+        self.finish(keyboard.detail(connected), connected, at_ms)
+    }
+
+    fn finish(&self, mut detail: DeviceDetail, connected: bool, at_ms: u64) -> DeviceDetail {
         detail.updated_at_ms = at_ms;
         detail.read_only = !(self.writes_allowed() && connected);
         detail
@@ -383,6 +683,10 @@ mod tests {
     struct Shared {
         inbox: VecDeque<Vec<u8>>,
         written: usize,
+        /// Frame bytes of every report written.
+        sent: Vec<u8>,
+        /// The reply to a B2 request; other requests are never answered.
+        b2: Option<Vec<u8>>,
     }
 
     /// A link that holds what the test queued and counts the reports written; it
@@ -390,8 +694,15 @@ mod tests {
     struct Mock(Rc<RefCell<Shared>>);
 
     impl RawLink for Mock {
-        fn write_report(&mut self, _report: &[u8; REPORT_LEN]) -> Result<(), LinkError> {
-            self.0.borrow_mut().written += 1;
+        fn write_report(&mut self, report: &[u8; REPORT_LEN]) -> Result<(), LinkError> {
+            let mut shared = self.0.borrow_mut();
+            shared.written += 1;
+            shared.sent.push(report[1]);
+            if report[1] == 0xB2
+                && let Some(reply) = shared.b2.clone()
+            {
+                shared.inbox.push_back(reply);
+            }
             Ok(())
         }
 
@@ -506,5 +817,94 @@ mod tests {
         assert_eq!(he.current_profile, 2);
         assert!(!kb.other_configurator());
         assert_eq!(shared.borrow().written, 0);
+    }
+
+    const B2_UP: [u8; 7] = [0xB2, 0x01, 0x34, 0x34, 0x20, 0x0E, 0x01];
+    const B2_NO_KEYBOARD: [u8; 7] = [0xB2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+    const B2_NOT_CONNECTED: [u8; 7] = [0xB2, 0x01, 0x34, 0x34, 0x20, 0x0E, 0x00];
+
+    fn frame(bytes: &[u8]) -> Vec<u8> {
+        let mut v = bytes.to_vec();
+        v.resize(32, 0);
+        v
+    }
+
+    fn link(linked: bool, b2: Option<&[u8]>, now: Instant) -> (Link<Mock>, Rc<RefCell<Shared>>) {
+        let shared = Rc::new(RefCell::new(Shared::default()));
+        shared.borrow_mut().b2 = b2.map(frame);
+        let mut session =
+            Session::with_link_for(Mock(Rc::clone(&shared)), keychron_proto::Target::Receiver);
+        session.set_reply_timeout(Duration::from_millis(200));
+        let link = Link {
+            session,
+            firmware: Some("d.3.1".to_owned()),
+            linked,
+            last_foreign: None,
+            next_read: now + LINK_POLL,
+            read_failing: false,
+        };
+        (link, shared)
+    }
+
+    #[test]
+    fn receiver_reads_b2_only_when_due_and_follows_the_link_state() {
+        let t0 = Instant::now();
+        let (mut rx, shared) = link(false, Some(&B2_UP), t0);
+        // Not due yet: nothing is sent.
+        assert_eq!(rx.step(t0, false, Duration::ZERO), Ok(false));
+        assert_eq!(shared.borrow().written, 0);
+        // A refresh reads B2 now: a connected K2 HE.
+        assert_eq!(rx.step(t0, true, Duration::ZERO), Ok(true));
+        assert!(rx.linked);
+        assert_eq!(shared.borrow().sent, vec![0xB2]);
+        // The same answer again changes nothing; the poll interval holds the next read.
+        assert_eq!(rx.step(t0, true, Duration::ZERO), Ok(false));
+        assert_eq!(
+            rx.step(t0 + LINK_POLL / 2, false, Duration::ZERO),
+            Ok(false)
+        );
+        assert_eq!(shared.borrow().sent, vec![0xB2, 0xB2]);
+        // Due again: the keyboard went away (B2 connected byte 0).
+        shared.borrow_mut().b2 = Some(frame(&B2_NOT_CONNECTED));
+        assert_eq!(rx.step(t0 + LINK_POLL, false, Duration::ZERO), Ok(true));
+        assert!(!rx.linked);
+        // Another device behind the receiver counts as not linked.
+        let (mut rx, _) = link(true, Some(&B2_NO_KEYBOARD), t0);
+        assert_eq!(rx.step(t0, true, Duration::ZERO), Ok(true));
+        assert!(!rx.linked);
+    }
+
+    #[test]
+    fn receiver_foreign_traffic_stops_sending_until_the_quiet_time_passed() {
+        let t0 = Instant::now();
+        let (mut rx, shared) = link(true, Some(&B2_UP), t0);
+        shared.borrow_mut().inbox.push_back(frame(&[0x55; 32]));
+        assert_eq!(rx.step(t0, false, Duration::ZERO), Ok(true));
+        assert!(rx.other_configurator());
+        assert!(rx.detail(None, true).keyboard.unwrap().other_configurator);
+        // Neither a refresh nor the poll interval sends anything meanwhile.
+        assert_eq!(rx.step(t0, true, Duration::ZERO), Ok(false));
+        let later = t0 + LINK_POLL + Duration::from_secs(1);
+        assert_eq!(rx.step(later, false, Duration::ZERO), Ok(false));
+        assert_eq!(shared.borrow().written, 0);
+        // After the quiet time the flag clears and B2 is due. The session own back-off runs
+        // on the real clock (5 s from the foreign report above), so the read is refused
+        // before a byte is written and a new quiet time starts: the attempt was made.
+        let quiet = t0 + FOREIGN_QUIET;
+        assert_eq!(rx.step(quiet, false, Duration::ZERO), Ok(false));
+        assert_eq!(rx.last_foreign, Some(quiet));
+        assert_eq!(shared.borrow().written, 0);
+    }
+
+    #[test]
+    fn receiver_detail_is_connected_or_disconnected_and_never_configurable() {
+        let t0 = Instant::now();
+        let (rx, _) = link(true, None, t0);
+        let up = rx.detail(None, true);
+        assert_eq!(up.summary.connection, Connection::Connected);
+        assert_eq!(up.transport, "2.4 GHz (Keychron Link)");
+        assert!(!up.keyboard.unwrap().configurable);
+        let down = rx.detail(None, false);
+        assert_eq!(down.summary.connection, Connection::Disconnected);
     }
 }

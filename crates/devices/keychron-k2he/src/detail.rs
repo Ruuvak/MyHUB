@@ -4,12 +4,20 @@ use keychron_proto::Keycode;
 use keychron_proto::he::{AdvanceMode, KeyMode, ProfileBuffer};
 use keychron_proto::plan::Keymap;
 use myhub_core::{
-    Connection, DeviceDetail, DeviceKind, DeviceSummary, HeModeView, HeProfileView, HeView,
-    KeyboardView, KeymapKeyView, KeymapLayerView, LightingView, TimersView,
+    Connection, ConnectionPath, DeviceDetail, DeviceKind, DeviceSummary, HeModeView, HeProfileView,
+    HeView, KeyboardView, KeymapKeyView, KeymapLayerView, LightingView, TimersView,
 };
 
+use crate::cache::KeyboardCache;
 use crate::snapshot::Snapshot;
 use crate::{DEVICE_ID, DISPLAY_NAME};
+
+/// Transport shown over the cable.
+pub const TRANSPORT_USB: &str = "USB";
+/// Transport shown through the Keychron Link receiver.
+pub const TRANSPORT_RECEIVER: &str = "2.4 GHz (Keychron Link)";
+/// Protocol shown over the receiver when no settings are known.
+pub const PROTOCOL_LINK: &str = "Keychron Link";
 
 /// Highest lighting effect number of the K2 HE (the launcher offers 0..=24) [INF].
 const EFFECT_MAX: u8 = 24;
@@ -116,6 +124,74 @@ fn keymap_view(keymaps: &[Keymap]) -> Vec<KeymapLayerView> {
 /// values stay); `other_configurator` is true while the worker backs off because another
 /// program talks to the keyboard. `updated_at_ms` is stamped by the caller.
 pub fn to_detail(snapshot: &Snapshot, connected: bool, other_configurator: bool) -> DeviceDetail {
+    shell(
+        TRANSPORT_USB,
+        usb_protocol(snapshot),
+        connected,
+        usb_view(
+            snapshot,
+            other_configurator,
+            connected && !other_configurator,
+        ),
+    )
+}
+
+/// The cache of the last USB read: the view as shown over the cable plus the protocol
+/// string, stamped with `at_ms` as the read time.
+pub fn cache_of(snapshot: &Snapshot, at_ms: u64) -> KeyboardCache {
+    let mut view = usb_view(snapshot, false, false);
+    view.cached_at_ms = Some(at_ms);
+    KeyboardCache {
+        protocol: usb_protocol(snapshot),
+        view,
+    }
+}
+
+/// The keyboard seen through the 2.4 GHz receiver. The settings are the cached ones of
+/// the last USB read (an empty view without a cache); nothing here is read from the
+/// keyboard. `connected` false keeps the cached values and marks the keyboard as gone.
+pub fn to_receiver_detail(
+    cache: Option<&KeyboardCache>,
+    receiver_firmware: Option<String>,
+    connected: bool,
+    other_configurator: bool,
+) -> DeviceDetail {
+    let (protocol, mut view) = match cache {
+        Some(c) => (c.protocol.clone(), c.view.clone()),
+        None => (
+            PROTOCOL_LINK.to_owned(),
+            KeyboardView {
+                firmware: String::new(),
+                via_protocol: 0,
+                layer_count: 0,
+                default_layer: None,
+                he: None,
+                lighting: None,
+                timers: None,
+                keymap: None,
+                other_configurator: false,
+                connection_path: ConnectionPath::Receiver,
+                configurable: false,
+                cached_at_ms: None,
+                receiver_firmware: None,
+            },
+        ),
+    };
+    view.connection_path = ConnectionPath::Receiver;
+    view.configurable = false;
+    view.other_configurator = connected && other_configurator;
+    view.receiver_firmware = receiver_firmware;
+    shell(TRANSPORT_RECEIVER, protocol, connected, view)
+}
+
+fn usb_protocol(snapshot: &Snapshot) -> String {
+    format!(
+        "VIA {} / Keychron HE {}",
+        snapshot.via_protocol, snapshot.he.version
+    )
+}
+
+fn shell(transport: &str, protocol: String, connected: bool, view: KeyboardView) -> DeviceDetail {
     DeviceDetail {
         summary: DeviceSummary {
             id: DEVICE_ID.to_owned(),
@@ -129,11 +205,8 @@ pub fn to_detail(snapshot: &Snapshot, connected: bool, other_configurator: bool)
             battery_percent: None,
         },
         vendor: "Keychron".to_owned(),
-        transport: "USB".to_owned(),
-        protocol: format!(
-            "VIA {} / Keychron HE {}",
-            snapshot.via_protocol, snapshot.he.version
-        ),
+        transport: transport.to_owned(),
+        protocol,
         read_only: true,
         updated_at_ms: 0,
         illustration: Some("k2he".to_owned()),
@@ -142,28 +215,36 @@ pub fn to_detail(snapshot: &Snapshot, connected: bool, other_configurator: bool)
         report_rate: None,
         onboard: None,
         headset: None,
-        keyboard: Some(KeyboardView {
-            firmware: snapshot.firmware.clone().unwrap_or_default(),
-            via_protocol: snapshot.via_protocol,
-            layer_count: snapshot
-                .layer_count
-                .or_else(|| {
-                    snapshot
-                        .keymaps
-                        .as_ref()
-                        .and_then(|k| u8::try_from(k.len()).ok())
-                })
-                .unwrap_or(0),
-            default_layer: snapshot.layer.map(|l| l.default_layer),
-            he: Some(he_view(snapshot)),
-            lighting: lighting_view(snapshot),
-            timers: snapshot.timers.map(|t| TimersView {
-                backlight_off_s: t.backlight_off_s,
-                sleep_s: t.sleep_s,
-                he_scan_idle_s: t.he_scan_idle_s,
-            }),
-            keymap: snapshot.keymaps.as_deref().map(keymap_view),
-            other_configurator,
+        keyboard: Some(view),
+    }
+}
+
+fn usb_view(snapshot: &Snapshot, other_configurator: bool, configurable: bool) -> KeyboardView {
+    KeyboardView {
+        firmware: snapshot.firmware.clone().unwrap_or_default(),
+        via_protocol: snapshot.via_protocol,
+        layer_count: snapshot
+            .layer_count
+            .or_else(|| {
+                snapshot
+                    .keymaps
+                    .as_ref()
+                    .and_then(|k| u8::try_from(k.len()).ok())
+            })
+            .unwrap_or(0),
+        default_layer: snapshot.layer.map(|l| l.default_layer),
+        he: Some(he_view(snapshot)),
+        lighting: lighting_view(snapshot),
+        timers: snapshot.timers.map(|t| TimersView {
+            backlight_off_s: t.backlight_off_s,
+            sleep_s: t.sleep_s,
+            he_scan_idle_s: t.he_scan_idle_s,
         }),
+        keymap: snapshot.keymaps.as_deref().map(keymap_view),
+        other_configurator,
+        connection_path: ConnectionPath::Usb,
+        configurable,
+        cached_at_ms: None,
+        receiver_firmware: None,
     }
 }

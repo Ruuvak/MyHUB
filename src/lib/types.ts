@@ -259,6 +259,14 @@ export interface KeyboardView {
   keymap: KeymapLayerView[] | null;
   /** True while another configurator talks to the keyboard and the app sends nothing. */
   otherConfigurator: boolean;
+  /** "usb": the cable; "receiver": the 2.4 GHz Keychron Link receiver (settings are the cached ones). */
+  connectionPath: "usb" | "receiver";
+  /** True only over USB and while no other configurator is active. */
+  configurable: boolean;
+  /** Unix ms of the USB read the shown settings come from; null over USB or without known settings. */
+  cachedAtMs: number | null;
+  /** Firmware of the 2.4 GHz receiver, when read. */
+  receiverFirmware: string | null;
 }
 
 export interface DeviceDetail extends DeviceSummary {

@@ -1,6 +1,7 @@
 import { Clock, Keyboard, Lightbulb, Sliders } from "@phosphor-icons/react";
 import { useState, type ReactNode } from "react";
 import { ReadOnlyNote } from "../../components/device/ReadOnlyNote";
+import { useUpdatedAgo } from "../../components/device/useUpdatedAgo";
 import { useT } from "../../i18n/useT";
 import { cx } from "../../lib/cx";
 import {
@@ -30,9 +31,11 @@ export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDe
   const keyboard = detail.keyboard;
   if (!keyboard) return null;
   const connected = detail.connection === "connected";
+  const receiver = keyboard.connectionPath === "receiver";
 
   return (
     <div className="flex flex-col gap-4">
+      {receiver ? <ReceiverNotes keyboard={keyboard} /> : null}
       <div className={cx("flex flex-col gap-4", !connected && "opacity-60")}>
         <Panel title={t("keyboard.info.title")} icon={<Keyboard size={18} weight="regular" aria-hidden="true" />}>
           <div className="px-4 pb-4">
@@ -40,6 +43,9 @@ export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDe
               <InfoRow label={t("keyboard.firmware")} value={keyboard.firmware || "--"} mono />
               <InfoRow label={t("keyboard.protocol")} value={detail.protocol} mono />
               <InfoRow label={t("keyboard.transport")} value={detail.transport} />
+              {keyboard.receiverFirmware ? (
+                <InfoRow label={t("keyboard.receiverFirmware")} value={keyboard.receiverFirmware} mono />
+              ) : null}
             </dl>
           </div>
         </Panel>
@@ -52,10 +58,28 @@ export function KeyboardPanel({ detail, onDetail }: { detail: DeviceDetail; onDe
 
       <div className="flex flex-col gap-2">
         {keyboard.otherConfigurator ? <ReadOnlyNote icon="info" text={t("keyboard.note.other")} /> : null}
-        <ReadOnlyNote icon="info" text={t("keyboard.note.usb")} />
+        {receiver ? null : <ReadOnlyNote icon="info" text={t("keyboard.note.usb")} />}
       </div>
     </div>
   );
+}
+
+/** Over the 2.4 GHz receiver: how it is connected and where the shown settings come from. */
+export function ReceiverNotes({ keyboard }: { keyboard: KeyboardView }) {
+  const t = useT();
+  return (
+    <div className="flex flex-col gap-2">
+      <ReadOnlyNote icon="info" text={t("keyboard.note.receiver")} />
+      <CacheLine cachedAtMs={keyboard.cachedAtMs} hasSettings={keyboard.he !== null} />
+    </div>
+  );
+}
+
+function CacheLine({ cachedAtMs, hasSettings }: { cachedAtMs: number | null; hasSettings: boolean }) {
+  const t = useT();
+  const when = useUpdatedAgo(cachedAtMs, "since");
+  const text = hasSettings && when ? t("keyboard.cache.since", { when }) : t("keyboard.cache.none");
+  return <p className="text-xs text-text-muted">{text}</p>;
 }
 
 function InfoRow({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {

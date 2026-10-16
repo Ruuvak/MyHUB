@@ -476,6 +476,7 @@ impl DeviceManager {
             state: Arc::clone(&state),
             commands: keychron_rx,
             shutdown: Arc::clone(&shutdown),
+            config_dir: config_dir.clone(),
         };
         let keychron_spawned =
             thread::Builder::new()
@@ -713,7 +714,8 @@ pub fn headset_status_text(detail: Option<&DeviceDetail>, language: Language) ->
 }
 
 /// Tray status line for the keyboard: `K2 HE: profile 2` (English) or `K2 HE: profil 2`
-/// while connected (the number is the active HE profile, counted from 1), just `K2 HE`
+/// while connected over USB (the number is the active HE profile, counted from 1), `K2 HE: 2.4 GHz`
+/// through the receiver, just `K2 HE`
 /// without HE data, `K2 HE: disconnected` / `K2 HE: rozłączona` while disconnected;
 /// `None` without a keyboard.
 pub fn keyboard_status_text(detail: Option<&DeviceDetail>, language: Language) -> Option<String> {
@@ -724,6 +726,15 @@ pub fn keyboard_status_text(detail: Option<&DeviceDetail>, language: Language) -
             Language::Pl => format!("{name}: rozłączona"),
             _ => format!("{name}: disconnected"),
         });
+    }
+    // Through the 2.4 GHz receiver the profile is the cached one of the last USB read,
+    // so the line says only how the keyboard is connected.
+    if detail
+        .keyboard
+        .as_ref()
+        .is_some_and(|k| k.connection_path == myhub_core::ConnectionPath::Receiver)
+    {
+        return Some(format!("{name}: 2.4 GHz"));
     }
     let profile = detail
         .keyboard
@@ -3600,6 +3611,10 @@ mod tests {
             timers: None,
             keymap: None,
             other_configurator: false,
+            connection_path: myhub_core::ConnectionPath::Usb,
+            configurable: true,
+            cached_at_ms: None,
+            receiver_firmware: None,
         });
         detail
     }
@@ -3616,6 +3631,13 @@ mod tests {
         assert_eq!(line(&off, Language::En), "K2 HE: disconnected");
         assert_eq!(line(&off, Language::Pl), "K2 HE: rozłączona");
         assert_eq!(keyboard_status_text(None, Language::En), None);
+        // Through the receiver: no profile number, both languages say 2.4 GHz.
+        let mut receiver = keyboard_detail(Connection::Connected, true);
+        receiver.keyboard.as_mut().unwrap().connection_path = myhub_core::ConnectionPath::Receiver;
+        assert_eq!(line(&receiver, Language::En), "K2 HE: 2.4 GHz");
+        assert_eq!(line(&receiver, Language::Pl), "K2 HE: 2.4 GHz");
+        receiver.summary.connection = Connection::Disconnected;
+        assert_eq!(line(&receiver, Language::Pl), "K2 HE: rozłączona");
         // Three devices fill the three tray rows, in slot order.
         let mouse = detail_for(Connection::Connected, Some(55));
         let mut headset = detail_for(Connection::Connected, Some(80));

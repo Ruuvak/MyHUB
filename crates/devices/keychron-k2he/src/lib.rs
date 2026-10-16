@@ -18,6 +18,7 @@
 //! The serial number and the device path are never read into output. Evidence tags
 //! as in keychron-proto: `[OBS]` seen on the keyboard, `[INF]` inference, `[UNK]` gap.
 
+mod cache;
 mod detail;
 mod discovery;
 mod error;
@@ -28,7 +29,10 @@ mod session;
 mod snapshot;
 mod writes;
 
-pub use detail::to_detail;
+pub use cache::{KeyboardCache, cache_path};
+pub use detail::{
+    PROTOCOL_LINK, TRANSPORT_RECEIVER, TRANSPORT_USB, cache_of, to_detail, to_receiver_detail,
+};
 pub use discovery::{InterfaceInfo, list_interfaces, list_receiver_interfaces};
 pub use error::SessionError;
 pub use hid::HidapiLink;

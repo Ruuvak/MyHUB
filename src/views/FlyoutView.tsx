@@ -27,7 +27,7 @@ import { SoundModeSwitch } from "./device/HeadsetPanel";
 import { useHeadsetWrite } from "./device/useHeadsetWrite";
 import { useSettings } from "../state/settings";
 import { activeHeProfile, brightnessPercent, formatMm, heModeKey, profileDisplayName } from "../lib/keyboard";
-import { EffectName } from "./device/KeyboardPanel";
+import { EffectName, ReceiverNotes } from "./device/KeyboardPanel";
 import { useKeyboardRefresh } from "./device/useKeyboardRefresh";
 
 /** Compact tray flyout card, rendered when the window label is "flyout". The tiles are read-only; they open the main window. */
@@ -401,6 +401,8 @@ function KeyboardFlyoutBody({ detail, onDetail }: { detail: DeviceDetail; onDeta
   const connected = detail.connection === "connected";
   const profile = keyboard ? activeHeProfile(keyboard) : null;
   const lighting = keyboard?.lighting ?? null;
+  // Over the receiver without a cache there is nothing to show in the tiles.
+  const showTiles = keyboard?.connectionPath !== "receiver" || profile !== null || lighting !== null;
 
   return (
     <>
@@ -420,18 +422,25 @@ function KeyboardFlyoutBody({ detail, onDetail }: { detail: DeviceDetail; onDeta
       </div>
 
       <div className="px-4 pt-3 pb-3">
-        <div className={cx("grid grid-cols-2 gap-2", !connected && "opacity-60")}>
-          <InfoTile
-            label={t("keyboard.he.title")}
-            value={profile ? profileDisplayName(profile, t) : "--"}
-            sub={profile ? `${t(heModeKey(profile.mode))}, ${formatMm(profile.actuationMm)}` : undefined}
-          />
-          <InfoTile
-            label={t("keyboard.light.title")}
-            value={lighting ? <EffectName effect={lighting.effect} /> : "--"}
-            sub={lighting ? `${t("keyboard.light.brightness")} ${brightnessPercent(lighting.brightness)}%` : undefined}
-          />
-        </div>
+        {showTiles ? (
+          <div className={cx("grid grid-cols-2 gap-2", !connected && "opacity-60")}>
+            <InfoTile
+              label={t("keyboard.he.title")}
+              value={profile ? profileDisplayName(profile, t) : "--"}
+              sub={profile ? `${t(heModeKey(profile.mode))}, ${formatMm(profile.actuationMm)}` : undefined}
+            />
+            <InfoTile
+              label={t("keyboard.light.title")}
+              value={lighting ? <EffectName effect={lighting.effect} /> : "--"}
+              sub={lighting ? `${t("keyboard.light.brightness")} ${brightnessPercent(lighting.brightness)}%` : undefined}
+            />
+          </div>
+        ) : null}
+        {keyboard?.connectionPath === "receiver" ? (
+          <div className="mt-2">
+            <ReceiverNotes keyboard={keyboard} />
+          </div>
+        ) : null}
         {keyboard?.otherConfigurator ? (
           <div className="mt-2">
             <ReadOnlyNote icon="info" text={t("keyboard.note.other")} />

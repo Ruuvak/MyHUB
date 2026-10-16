@@ -10,10 +10,8 @@ hidapi.workspace = true
 keychron-proto.workspace = true
 myhub-core.workspace = true
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true
 
 # Pure-Rust backends, as in crates/transport/Cargo.toml (the workspace entry disables
 # the default features, so the backend is chosen per target here).

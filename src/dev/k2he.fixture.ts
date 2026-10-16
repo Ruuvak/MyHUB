@@ -2,7 +2,7 @@
  * Dev preview only: a Keychron K2 HE shaped like the backend answers (see ipc-contract.md, "Keychron K2 HE").
  * Values from the read-only probe of 2026-10-16 (.claude/crew/keychron-notes.md); the keymap rows are the
  * golden read in crates/keychron-proto/tests/fixtures/k2he_keymap.txt. Loaded through src/dev/demo.ts when
- * the URL has `?demo=k2he`, `?demo=k2he-busy` or `?demo=all`. No serial number.
+ * the URL has `?demo=k2he`, `?demo=k2he-busy`, `?demo=k2he-24` (2.4 GHz receiver, cached settings), `?demo=k2he-24-empty` (receiver, no cache) or `?demo=all`. No serial number.
  */
 import type { DeviceDetail, KeymapKeyView, KeymapLayerView } from "../lib/types";
 
@@ -94,7 +94,37 @@ function buildKeymap(): KeymapLayerView[] {
   });
 }
 
-export function buildK2heDetail(busy: boolean): DeviceDetail {
+export type K2hePath = "usb" | "receiver" | "receiver-empty";
+
+export function buildK2heDetail(busy: boolean, path: K2hePath = "usb"): DeviceDetail {
+  const detail = buildUsbDetail(busy);
+  if (path === "usb" || !detail.keyboard) return detail;
+  const empty = path === "receiver-empty";
+  return {
+    ...detail,
+    transport: "2.4 GHz (Keychron Link)",
+    protocol: empty ? "Keychron Link" : detail.protocol,
+    keyboard: {
+      ...detail.keyboard,
+      firmware: empty ? "" : detail.keyboard.firmware,
+      viaProtocol: empty ? 0 : detail.keyboard.viaProtocol,
+      layerCount: empty ? 0 : detail.keyboard.layerCount,
+      defaultLayer: empty ? null : detail.keyboard.defaultLayer,
+      he: empty ? null : detail.keyboard.he,
+      lighting: empty ? null : detail.keyboard.lighting,
+      timers: empty ? null : detail.keyboard.timers,
+      keymap: empty ? null : detail.keyboard.keymap,
+      otherConfigurator: busy,
+      connectionPath: "receiver",
+      configurable: false,
+      // Read over USB two hours ago.
+      cachedAtMs: empty ? null : Date.now() - 2 * 3_600_000,
+      receiverFirmware: "d.3.1 Jan  5 2026 16:57:08",
+    },
+  };
+}
+
+function buildUsbDetail(busy: boolean): DeviceDetail {
   return {
     id: "keychron-k2he",
     name: "K2 HE",
@@ -130,6 +160,10 @@ export function buildK2heDetail(busy: boolean): DeviceDetail {
       timers: { backlightOffS: 600, sleepS: 7200, heScanIdleS: 1800 },
       keymap: buildKeymap(),
       otherConfigurator: busy,
+      connectionPath: "usb",
+      configurable: !busy,
+      cachedAtMs: null,
+      receiverFirmware: null,
     },
   };
 }

@@ -11,6 +11,8 @@ export function demoDetails(demo: string | null): DeviceDetail[] {
   else if (demo === "sony") list.push(buildSonyDetail(true));
   else if (demo === "k2he") list.push(buildK2heDetail(false));
   else if (demo === "k2he-busy") list.push(buildK2heDetail(true));
+  else if (demo === "k2he-24") list.push(buildK2heDetail(false, "receiver"));
+  else if (demo === "k2he-24-empty") list.push(buildK2heDetail(false, "receiver-empty"));
   else if (demo === "sony-off") list.push(buildSonyDetail(false));
   else list.push(g502xDetail(demo));
   return list.filter((d): d is DeviceDetail => d !== null);

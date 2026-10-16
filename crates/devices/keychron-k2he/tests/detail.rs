@@ -1,8 +1,11 @@
 mod common;
 
 use common::Mock;
-use keychron_k2he::{Event, Session, Snapshot, read_snapshot, refresh_state, to_detail};
-use myhub_core::{Connection, DeviceKind, HeModeView};
+use keychron_k2he::{
+    Event, KeyboardCache, Session, Snapshot, cache_of, cache_path, read_snapshot, refresh_state,
+    to_detail, to_receiver_detail,
+};
+use myhub_core::{Connection, ConnectionPath, DeviceKind, HeModeView};
 
 fn golden_snapshot() -> (Session<Mock>, Snapshot) {
     let mut s = Session::with_link(Mock::golden());
@@ -113,4 +116,63 @@ fn events_patch_the_cached_snapshot() {
     let kb = detail.keyboard.unwrap();
     assert_eq!(kb.he.unwrap().current_profile, 1);
     assert_eq!(kb.lighting.unwrap().effect, 7);
+}
+
+#[test]
+fn usb_detail_is_configurable_unless_another_program_talks() {
+    let (_, snap) = golden_snapshot();
+    let kb = to_detail(&snap, true, false).keyboard.unwrap();
+    assert_eq!(kb.connection_path, ConnectionPath::Usb);
+    assert!(kb.configurable);
+    assert_eq!((kb.cached_at_ms, kb.receiver_firmware), (None, None));
+    assert!(!to_detail(&snap, true, true).keyboard.unwrap().configurable);
+    assert!(
+        !to_detail(&snap, false, false)
+            .keyboard
+            .unwrap()
+            .configurable
+    );
+}
+
+#[test]
+fn receiver_detail_shows_the_cache_or_an_empty_view() {
+    let (_, snap) = golden_snapshot();
+    let cache = cache_of(&snap, 1_234);
+    let detail = to_receiver_detail(Some(&cache), Some("d.3.1".to_owned()), true, false);
+    assert_eq!(detail.transport, "2.4 GHz (Keychron Link)");
+    assert_eq!(detail.protocol, "VIA 12 / Keychron HE 4");
+    assert_eq!(detail.summary.connection, Connection::Connected);
+    let kb = detail.keyboard.unwrap();
+    assert_eq!(kb.connection_path, ConnectionPath::Receiver);
+    assert!(!kb.configurable);
+    assert_eq!(kb.cached_at_ms, Some(1_234));
+    assert_eq!(kb.receiver_firmware.as_deref(), Some("d.3.1"));
+    assert!(kb.he.is_some() && kb.keymap.is_some());
+
+    let empty = to_receiver_detail(None, None, true, false);
+    assert_eq!(empty.protocol, "Keychron Link");
+    let kb = empty.keyboard.unwrap();
+    assert!(kb.he.is_none() && kb.lighting.is_none() && kb.timers.is_none() && kb.keymap.is_none());
+    assert_eq!(kb.cached_at_ms, None);
+
+    let gone = to_receiver_detail(Some(&cache), None, false, true);
+    assert_eq!(gone.summary.connection, Connection::Disconnected);
+    assert!(!gone.keyboard.unwrap().other_configurator);
+}
+
+#[test]
+fn cache_round_trips_through_a_file_without_leftovers() {
+    let (_, snap) = golden_snapshot();
+    let cache = cache_of(&snap, 99);
+    let dir = std::env::temp_dir().join(format!("myhub-k2he-cache-{}", std::process::id()));
+    let path = cache_path(&dir);
+    assert_eq!(KeyboardCache::load(&path), None);
+    cache.save(&path).unwrap();
+    cache.save(&path).unwrap();
+    assert_eq!(KeyboardCache::load(&path), Some(cache));
+    let entries = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+    assert_eq!(entries, 1);
+    std::fs::write(&path, b"{ not json").unwrap();
+    assert_eq!(KeyboardCache::load(&path), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

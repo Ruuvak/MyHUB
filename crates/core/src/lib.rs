@@ -287,7 +287,7 @@ pub struct HeadsetView {
 }
 
 /// Key work mode of a Hall effect profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HeModeView {
     Global,
@@ -297,7 +297,7 @@ pub enum HeModeView {
 
 /// One Hall effect profile. The millimetre values are the profile's global word
 /// (0.1 mm steps on the wire).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeProfileView {
     pub index: u8,
@@ -318,7 +318,7 @@ pub struct HeProfileView {
 }
 
 /// Hall effect state of a keyboard.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeView {
     /// 0-based index of the active profile.
@@ -329,7 +329,7 @@ pub struct HeView {
 }
 
 /// Global lighting of a keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LightingView {
     pub brightness: u8,
@@ -345,7 +345,7 @@ pub struct LightingView {
 }
 
 /// Idle timers of a keyboard, in seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimersView {
     pub backlight_off_s: u16,
@@ -354,7 +354,7 @@ pub struct TimersView {
 }
 
 /// One key of a keymap layer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeymapKeyView {
     pub row: u8,
@@ -365,15 +365,25 @@ pub struct KeymapKeyView {
 }
 
 /// One keymap layer; matrix slots without a physical key are left out.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeymapLayerView {
     pub index: u8,
     pub keys: Vec<KeymapKeyView>,
 }
 
+/// How the keyboard reaches the computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionPath {
+    /// The USB cable: the keyboard answers configuration frames.
+    Usb,
+    /// The 2.4 GHz receiver: only the link state can be read.
+    Receiver,
+}
+
 /// Keyboard specific data (read only for now).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyboardView {
     pub firmware: String,
@@ -386,6 +396,16 @@ pub struct KeyboardView {
     pub keymap: Option<Vec<KeymapLayerView>>,
     /// Another configurator talks to the keyboard: the app sends nothing and waits.
     pub other_configurator: bool,
+    pub connection_path: ConnectionPath,
+    /// True only over USB and while no other configurator is active.
+    pub configurable: bool,
+    /// Unix ms of the USB read the shown settings come from; `None` over USB (live) and
+    /// when no settings are known.
+    #[serde(default)]
+    pub cached_at_ms: Option<u64>,
+    /// Firmware of the 2.4 GHz receiver (B3), when read.
+    #[serde(default)]
+    pub receiver_firmware: Option<String>,
 }
 
 /// One onboard profile.

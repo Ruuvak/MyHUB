@@ -9,7 +9,9 @@ export type PluralBase =
   | "count.devicesConnected"
   | "count.levels"
   | "ago.minutes"
-  | "ago.hours";
+  | "ago.hours"
+  | "since.minutes"
+  | "since.hours";
 
 /** Current language, resolved from the settings. */
 export function useLanguage(): Language {
