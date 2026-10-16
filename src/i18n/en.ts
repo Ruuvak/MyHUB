@@ -52,6 +52,16 @@ export const en = {
   "settings.retry": "Try again",
 
   "about.title": "About",
+  "update.checking": "Checking for updates",
+  "update.available": "Version {version} available",
+  "update.install": "Install and restart",
+  "update.later": "Later",
+  "update.downloading": "Downloading the update",
+  "update.downloadingPercent": "Downloading the update, {percent}%",
+  "update.latest": "You have the latest version",
+  "update.error": "Could not update: {message}",
+  "update.dismiss": "Close",
+
   "about.version": "Version",
   "about.description":
     "MyHUB manages peripherals in one window, without the manufacturer's software. Currently supported: Logitech G502 X LIGHTSPEED, Sony WF-C710N (read-only).",

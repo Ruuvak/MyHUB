@@ -48,7 +48,7 @@ use myhub_core::{Connection, DeviceDetail};
 use serde::Deserialize;
 use tauri::Manager;
 
-use crate::device_manager::{ManagerState, Slot, clock_ms, lock, publish_slot};
+use crate::device_manager::{FlashFlag, ManagerState, Slot, clock_ms, lock, publish_slot};
 use crate::settings::SettingsState;
 
 /// Pause between enumerations while the keyboard is absent, and between the checks for
@@ -792,6 +792,8 @@ pub struct KeychronWorker {
     pub state: Arc<Mutex<ManagerState>>,
     pub commands: Receiver<KeychronCommand>,
     pub shutdown: Arc<AtomicBool>,
+    /// Up while a write sequence runs; shutdown waits for it.
+    pub write_in_flight: Arc<AtomicBool>,
     /// App config dir; the cache of the last USB read lives under it.
     pub config_dir: Option<PathBuf>,
 }
@@ -991,6 +993,15 @@ impl KeychronWorker {
         cache: &mut Option<KeyboardCache>,
         selects: Vec<PendingWrite>,
     ) -> Result<(), String> {
+        // Shutdown waits while the flag is up. The flag is set before the stop check and
+        // shutdown sets the stop flag before it reads the flag, so one sees the other.
+        let mut in_flight = (!selects.is_empty()).then(|| FlashFlag::set(&self.write_in_flight));
+        if in_flight.is_some() && self.stopping() {
+            for write in selects {
+                let _ = write.reply.send(Err("disconnected".to_owned()));
+            }
+            return Ok(());
+        }
         drain_writes(
             keyboard,
             selects,
@@ -1004,7 +1015,11 @@ impl KeychronWorker {
                 }
                 let detail = self.stamped(keyboard, true, *stamp);
                 if publish {
+                    // The write is over: shutdown must not wait on a worker blocked in the
+                    // tray. Re-armed for the writes still queued.
+                    in_flight.take();
                     self.publish(detail.clone(), true);
+                    in_flight = Some(FlashFlag::set(&self.write_in_flight));
                 }
                 detail
             },

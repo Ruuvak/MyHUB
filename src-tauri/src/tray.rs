@@ -6,7 +6,7 @@ use myhub_core::Connection;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Manager, Theme};
+use tauri::{App, AppHandle, Emitter, Manager, Theme};
 
 use crate::flyout;
 use crate::settings::{Language, Settings, SettingsState, resolve_language};
@@ -15,6 +15,8 @@ pub const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "main";
 const ID_FLYOUT: &str = "flyout";
 const ID_SHOW: &str = "show";
+pub const CHECK_UPDATES_EVENT: &str = "check-updates";
+const ID_CHECK_UPDATES: &str = "check-updates";
 pub const ID_DEVICES_STATUS: &str = "devices-status";
 /// Most device status rows the menu shows. Rows beyond the first sit in the menu only while
 /// they have a line.
@@ -96,6 +98,7 @@ struct Texts {
     flyout: &'static str,
     show: &'static str,
     no_devices: &'static str,
+    check_updates: &'static str,
     quit: &'static str,
 }
 
@@ -105,12 +108,14 @@ fn texts(language: Language) -> Texts {
             flyout: "Szybki panel",
             show: "Pokaż MyHUB",
             no_devices: "Brak urządzeń",
+            check_updates: "Sprawdź aktualizacje",
             quit: "Zakończ",
         },
         _ => Texts {
             flyout: "Quick panel",
             show: "Show MyHUB",
             no_devices: "No devices",
+            check_updates: "Check for updates",
             quit: "Quit",
         },
     }
@@ -140,6 +145,7 @@ pub struct TrayState {
     /// rows are always a prefix.
     extra_status: Vec<(MenuItem<tauri::Wry>, Mutex<bool>)>,
     menu: Menu<tauri::Wry>,
+    check_updates: MenuItem<tauri::Wry>,
     quit: MenuItem<tauri::Wry>,
     /// Text set by the device layer; `None` means the localized "No devices".
     devices_text: Mutex<Option<String>>,
@@ -197,6 +203,14 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Tray "Check for updates": shows the main window and tells its UI to run a manual check.
+fn check_updates_from_tray(app: &AppHandle) {
+    show_main_window(app);
+    if let Err(e) = app.emit_to(MAIN_WINDOW, CHECK_UPDATES_EVENT, ()) {
+        eprintln!("myhub: cannot emit {CHECK_UPDATES_EVENT}: {e}");
+    }
+}
+
 /// Creates the tray icon and its menu and registers [`TrayState`].
 pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
     let t = texts(effective_language(settings));
@@ -213,9 +227,20 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
                 .map(|item| (item, Mutex::new(false)))
         })
         .collect::<tauri::Result<Vec<_>>>()?;
+    let check_updates = MenuItemBuilder::with_id(ID_CHECK_UPDATES, t.check_updates).build(app)?;
     let quit = MenuItemBuilder::with_id(ID_QUIT, t.quit).build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&flyout, &show, &devices_status, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &flyout,
+            &show,
+            &devices_status,
+            &check_updates,
+            &separator,
+            &quit,
+        ],
+    )?;
 
     // The main window follows the OS app theme; a taskbar theme of its own is not exposed, so dark
     // is the default when the window or its theme is unavailable.
@@ -236,6 +261,7 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             ID_FLYOUT => flyout::show(app),
             ID_SHOW => show_main_window(app),
+            ID_CHECK_UPDATES => check_updates_from_tray(app),
             ID_QUIT => app.exit(0),
             _ => {}
         })
@@ -260,6 +286,7 @@ pub fn init(app: &App, settings: &Settings) -> tauri::Result<()> {
         devices_status,
         extra_status,
         menu,
+        check_updates,
         quit,
         devices_text: Mutex::new(None),
         icon: Mutex::new(choice),
@@ -275,6 +302,7 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     let t = texts(effective_language(settings));
     let _ = state.flyout.set_text(t.flyout);
     let _ = state.show.set_text(t.show);
+    let _ = state.check_updates.set_text(t.check_updates);
     let _ = state.quit.set_text(t.quit);
     if state.lock_text().is_none() {
         let _ = state.devices_status.set_text(t.no_devices);

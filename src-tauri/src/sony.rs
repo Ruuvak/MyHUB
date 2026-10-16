@@ -33,7 +33,7 @@ use sony_wf_c710n::{
 
 use tauri::Manager;
 
-use crate::device_manager::{ManagerState, Slot, clock_ms, lock, publish_slot};
+use crate::device_manager::{FlashFlag, ManagerState, Slot, clock_ms, lock, publish_slot};
 use crate::settings::SettingsState;
 
 /// Pause between scans while no headset is paired or the first connect fails.
@@ -243,6 +243,8 @@ pub struct SonyWorker {
     pub state: Arc<Mutex<ManagerState>>,
     pub commands: Receiver<SonyCommand>,
     pub shutdown: Arc<AtomicBool>,
+    /// Up while a write sequence runs; shutdown waits for it.
+    pub write_in_flight: Arc<AtomicBool>,
 }
 
 /// A failure that means the link is gone (as opposed to a refused request).
@@ -381,6 +383,13 @@ impl SonyWorker {
             }
             let mut writes = writes.into_iter();
             while let Some((op, deadline, reply)) = writes.next() {
+                // Shutdown waits while the flag is up. It is set before the stop check and
+                // dropped before the final publish (see keychron.rs).
+                let mut in_flight = Some(FlashFlag::set(&self.write_in_flight));
+                if self.stopping() {
+                    let _ = reply.send(Err("disconnected".to_owned()));
+                    continue;
+                }
                 if let Some(outcome) = self.run_write(
                     session,
                     snapshot,
@@ -389,6 +398,7 @@ impl SonyWorker {
                     op,
                     deadline,
                     reply,
+                    &mut in_flight,
                 ) {
                     // The link is gone: the writes still queued cannot run.
                     for (_, _, queued) in writes {
@@ -472,6 +482,7 @@ impl SonyWorker {
         op: SonyWrite,
         deadline: Instant,
         reply: Sender<Result<DeviceDetail, String>>,
+        in_flight: &mut Option<FlashFlag>,
     ) -> Option<Outcome> {
         if let Err(code) = precheck(&op, self.writes_allowed(), true) {
             let _ = reply.send(Err(code.to_owned()));
@@ -491,6 +502,8 @@ impl SonyWorker {
             Ok(Done::Applied) => {
                 *stamp = clock_ms();
                 let detail = self.stamped(snapshot, true, *stamp);
+                // The write is over: shutdown must not wait on a worker blocked in the tray.
+                in_flight.take();
                 self.publish(detail.clone(), true);
                 let _ = reply.send(Ok(detail));
                 None
@@ -531,6 +544,7 @@ impl SonyWorker {
                     return Some(Outcome::Lost(read_error.to_string()));
                 }
                 *stamp = clock_ms();
+                in_flight.take();
                 self.publish(self.stamped(snapshot, true, *stamp), false);
                 None
             }

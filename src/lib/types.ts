@@ -34,6 +34,20 @@ export interface DeviceSummary {
   batteryPercent: number | null;
 }
 
+/** An update the endpoint offers. */
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes: string | null;
+  date: string | null;
+}
+
+/** Download progress; total is null when the server sent no length. */
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
 export interface AppInfo {
   name: string;
   version: string;

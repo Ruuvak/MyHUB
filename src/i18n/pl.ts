@@ -54,6 +54,16 @@ export const pl: Messages = {
   "settings.retry": "Spróbuj ponownie",
 
   "about.title": "O aplikacji",
+  "update.checking": "Sprawdzanie aktualizacji",
+  "update.available": "Dostępna wersja {version}",
+  "update.install": "Zainstaluj i uruchom ponownie",
+  "update.later": "Później",
+  "update.downloading": "Pobieranie aktualizacji",
+  "update.downloadingPercent": "Pobieranie aktualizacji, {percent}%",
+  "update.latest": "Masz najnowszą wersję",
+  "update.error": "Nie udało się zaktualizować: {message}",
+  "update.dismiss": "Zamknij",
+
   "about.version": "Wersja",
   "about.description":
     "MyHUB zarządza urządzeniami peryferyjnymi w jednym oknie, bez oprogramowania producenta. Obecnie obsługiwane: Logitech G502 X LIGHTSPEED, Sony WF-C710N (tylko odczyt).",

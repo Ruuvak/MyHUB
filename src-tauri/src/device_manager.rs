@@ -450,6 +450,9 @@ pub struct DeviceManager {
     router: Router,
     shutdown: Arc<AtomicBool>,
     flash_in_flight: Arc<AtomicBool>,
+    /// A keyboard or headset write is running; shutdown waits for it like for a flash write.
+    keychron_write_in_flight: Arc<AtomicBool>,
+    sony_write_in_flight: Arc<AtomicBool>,
     thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
     sony_thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
     keychron_thread: Mutex<Option<(JoinHandle<()>, Receiver<()>)>>,
@@ -477,6 +480,8 @@ impl DeviceManager {
         let state = Arc::new(Mutex::new(ManagerState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let flash_in_flight = Arc::new(AtomicBool::new(false));
+        let keychron_write_in_flight = Arc::new(AtomicBool::new(false));
+        let sony_write_in_flight = Arc::new(AtomicBool::new(false));
         let (commands, command_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let config_dir = app.path().app_config_dir().ok();
@@ -488,6 +493,7 @@ impl DeviceManager {
             state: Arc::clone(&state),
             commands: sony_rx,
             shutdown: Arc::clone(&shutdown),
+            write_in_flight: Arc::clone(&sony_write_in_flight),
         };
         let sony_spawned = thread::Builder::new()
             .name("sony-worker".into())
@@ -510,6 +516,7 @@ impl DeviceManager {
             state: Arc::clone(&state),
             commands: keychron_rx,
             shutdown: Arc::clone(&shutdown),
+            write_in_flight: Arc::clone(&keychron_write_in_flight),
             config_dir: config_dir.clone(),
         };
         let keychron_spawned =
@@ -563,6 +570,8 @@ impl DeviceManager {
             },
             shutdown,
             flash_in_flight,
+            keychron_write_in_flight,
+            sony_write_in_flight,
             thread: Mutex::new(thread),
             sony_thread: Mutex::new(sony_thread),
             keychron_thread: Mutex::new(keychron_thread),
@@ -693,9 +702,17 @@ impl DeviceManager {
     /// bounded in case a worker is stuck in a device read.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        // A flash write already running is not interrupted: wait for it.
-        if !wait_for_flash(&self.flash_in_flight, FLASH_SHUTDOWN_WAIT) {
-            eprintln!("myhub: a flash write is still running after {FLASH_SHUTDOWN_WAIT:?}");
+        // A write already running is not interrupted: wait for it, all three against one
+        // deadline.
+        let end = Instant::now() + FLASH_SHUTDOWN_WAIT;
+        for (flag, what) in [
+            (&self.flash_in_flight, "flash"),
+            (&self.keychron_write_in_flight, "keyboard"),
+            (&self.sony_write_in_flight, "headset"),
+        ] {
+            if !wait_for_flash(flag, end.saturating_duration_since(Instant::now())) {
+                eprintln!("myhub: a {what} write is still running after {FLASH_SHUTDOWN_WAIT:?}");
+            }
         }
         self.router.wake_all();
         // Stop order: the keyboard worker first (one listen, 200 ms), then the headset
@@ -1181,10 +1198,10 @@ fn update_prefs(path: &Path, change: impl FnOnce(&mut DevicePrefs)) {
 }
 
 /// Holds the flash-in-flight flag up; clears it when dropped (also on a panic).
-struct FlashFlag(Arc<AtomicBool>);
+pub(crate) struct FlashFlag(Arc<AtomicBool>);
 
 impl FlashFlag {
-    fn set(flag: &Arc<AtomicBool>) -> Self {
+    pub(crate) fn set(flag: &Arc<AtomicBool>) -> Self {
         flag.store(true, Ordering::SeqCst);
         Self(Arc::clone(flag))
     }
@@ -3026,6 +3043,20 @@ mod tests {
     use myhub_transport::LinkError;
 
     use super::*;
+
+    #[test]
+    fn shutdown_wait_covers_a_keyboard_write_in_flight() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let guard = FlashFlag::set(&flag);
+        // Still up: the wait gives up at the limit.
+        assert!(!wait_for_flash(&flag, Duration::from_millis(60)));
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            drop(guard);
+        });
+        assert!(wait_for_flash(&flag, Duration::from_secs(5)));
+        releaser.join().unwrap();
+    }
 
     const FRAMES_LOG: &str = include_str!("../../crates/hidpp/tests/fixtures/frames.log");
     const IDX_BATTERY: u8 = 6;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Sidebar, type View } from "./components/Sidebar";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { takePendingTab } from "./lib/deepLink";
 import { onSelectDevice } from "./lib/ipc";
 import { initialDeviceUi, type DeviceUi } from "./state/deviceUi";
@@ -60,21 +61,24 @@ export function App() {
         }}
         onNavigate={setView}
       />
-      <main className="h-full min-w-0 overflow-y-auto overflow-x-hidden p-8">
-        <div key={view} className="animate-page h-full">
-          {view === "devices" ? (
-            <DevicesView
-              devices={devices}
-              selected={selected}
-              ui={deviceUi}
-              onUiChange={updateDeviceUi}
-              onOpenSettings={() => setView("settings")}
-            />
-          ) : null}
-          {view === "settings" ? <SettingsView /> : null}
-          {view === "about" ? <AboutView /> : null}
-        </div>
-      </main>
+      <div className="flex h-full min-h-0 min-w-0 flex-col">
+        <UpdateBanner />
+        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-8">
+          <div key={view} className="animate-page h-full">
+            {view === "devices" ? (
+              <DevicesView
+                devices={devices}
+                selected={selected}
+                ui={deviceUi}
+                onUiChange={updateDeviceUi}
+                onOpenSettings={() => setView("settings")}
+              />
+            ) : null}
+            {view === "settings" ? <SettingsView /> : null}
+            {view === "about" ? <AboutView /> : null}
+          </div>
+        </main>
+      </div>
     </div>
   );
 }

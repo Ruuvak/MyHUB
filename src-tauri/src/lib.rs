@@ -5,6 +5,7 @@ pub mod keychron;
 pub mod settings;
 pub mod sony;
 pub mod tray;
+pub mod updater;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
@@ -405,6 +406,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_main_window(app);
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -416,6 +418,7 @@ pub fn run() {
             let current = state.get();
             app.manage(state);
             app.manage(flyout::FlyoutState::default());
+            app.manage(updater::PendingUpdate::default());
             sync_autostart(app.handle(), current.launch_at_login);
             let autostarted = std::env::args().any(|a| a == AUTOSTART_ARG);
 
@@ -489,7 +492,9 @@ pub fn run() {
             set_keyboard_travel,
             set_keyboard_lighting,
             open_main_window,
-            hide_flyout
+            hide_flyout,
+            updater::check_for_update,
+            updater::install_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building MyHUB")

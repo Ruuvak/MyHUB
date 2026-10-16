@@ -15,6 +15,8 @@ import type {
   SaveProfileArgs,
   SaveProfileResult,
   Settings,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
 
 /** Typed wrapper over the Tauri commands and events. Outside Tauri it falls back to a dev preview. */
@@ -487,4 +489,28 @@ export async function setKeyboardLighting(id: string, args: KeyboardLightingArgs
     return (await previewDetail(id)) ?? detail;
   }
   return invoke<DeviceDetail>("set_keyboard_lighting", { id, ...args });
+}
+
+/** Asks the update endpoint for a newer version; null when this is the latest. Rejects with the error text. */
+export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  if (!isTauri()) return null;
+  return invoke<UpdateInfo | null>("check_for_update");
+}
+
+/**
+ * Downloads the update found by checkForUpdate, installs it and restarts the app. Resolves only when the install
+ * failed to end the process; rejects with the error text.
+ */
+export async function installUpdate(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("install_update");
+}
+
+export function onUpdateProgress(cb: (progress: UpdateProgress) => void): Promise<() => void> {
+  return subscribe<UpdateProgress>("update-progress", cb);
+}
+
+/** Sent to the main window by the tray item "Check for updates". */
+export function onCheckUpdates(cb: () => void): Promise<() => void> {
+  return subscribe<null>("check-updates", () => cb());
 }
