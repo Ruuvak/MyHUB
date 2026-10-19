@@ -9,6 +9,7 @@
 //! `kc_probe set profile <1..3> [--save]`
 //! `kc_probe set travel --mode static|rt --actuation <mm> [--press <mm>] [--release <mm>] [--save]`
 //! `kc_probe set light [--effect N] [--brightness 0..255] [--speed 0..255] [--hue 0..255 --sat 0..255] [--save]`
+//! `kc_probe set key --layer <0..3> --row <0..5> --col <0..15> --code <0x004C or KC_DEL or RGB_MOD>`
 //! `kc_probe link [--trace]`
 //!
 //! * `travel`: read only. Prints the CURRENT profile's global mode, actuation and (for
@@ -20,6 +21,14 @@
 //!   from the flags, or from the current value when a flag is absent. Prints before,
 //!   after, saved and frames written. Nothing is sent when the values already hold and
 //!   `--save` is absent. `--save` also sends A9 1F, which WRITES FLASH.
+//! * `set key`: VIA 05 sets ONE key of the keymap and WRITES FLASH at once [INF: VIA 05
+//!   persists immediately, there is no save step]. Layer, row and column are 0-based (layer
+//!   0..3, row 0..5, column 0..15); `--code` is a hex number or a QMK name (`KC_DEL`,
+//!   `RGB_MOD`, `KC_NO`, `KC_TRNS`). Only basic keys, KC_NO, KC_TRNS, RGB and named
+//!   Keychron keys are accepted; the QMK 0x7C00 block (boot, reboot, clear EEPROM) and any
+//!   unknown code is refused before a byte is sent. Reads the key, writes nothing when it
+//!   already holds the code, else sends one VIA 05 frame and reads the key back. Prints
+//!   before and after as hex and name.
 //! * `set light`: VIA 07 03 per changed field (RAM), in the order effect, brightness,
 //!   speed, colour; effect 0..24; `--hue` and `--sat` go together. Prints before, after,
 //!   saved and frames written. `--save` also sends VIA 09 03, which WRITES FLASH.
@@ -52,7 +61,7 @@
 //!
 //! What it sends: `list`, `state`, `watch`, `profile` and `travel` send only Read-tier
 //! requests (the stored session policy is read-only). `set profile` also sends A9 11,
-//! `set travel` A9 14, `set light` VIA 07 03, and with `--save` A9 1F or VIA 09 03, each
+//! `set travel` A9 14, `set light` VIA 07 03, `set key` VIA 05 (Persistent), and with `--save` A9 1F or VIA 09 03, each
 //! through a policy that opens only that tier for that call. A write that fails to read
 //! back as written (or times out) leaves the state unknown: run `travel` or `state`. It
 //! stops with an error and sends nothing more when it sees foreign traffic (the launcher
@@ -61,16 +70,19 @@
 //! Exit codes: 0 ok, 1 no keyboard found, 2 bad arguments, 3 failure.
 
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use keychron_k2he::{
     DEFAULT_SENSITIVITY, DISPLAY_NAME, FrameDirection, Incoming, InterfaceInfo, LINK_PID,
-    LightChange, LightState, LinkSnapshot, Session, SessionError, Snapshot, TravelSettings,
-    list_interfaces, list_receiver_interfaces, read_global_word, read_link, read_profiles_info,
-    read_snapshot, select_profile, set_lighting, set_travel_global,
+    LightChange, LightState, LinkSnapshot, MATRIX_COLS, MATRIX_ROWS, Session, SessionError,
+    Snapshot, TravelSettings, list_interfaces, list_receiver_interfaces, read_global_word,
+    read_link, read_profiles_info, read_snapshot, select_profile, set_keycode, set_lighting,
+    set_travel_global,
 };
 use keychron_proto::TravelMode;
 use keychron_proto::he::{KeyMode, KeyWord};
+use keychron_proto::keycode::{Keycode, check_writable, parse_code};
 use keychron_proto::request::{ACTUATION_RANGE, EFFECT_MAX, SENSITIVITY_RANGE};
 
 enum Command {
@@ -99,6 +111,12 @@ enum Command {
     SetLight {
         change: LightChange,
         save: bool,
+    },
+    SetKey {
+        layer: u8,
+        row: u8,
+        col: u8,
+        code: u16,
     },
 }
 
@@ -164,6 +182,50 @@ fn parse_set_light(mut args: impl Iterator<Item = String>) -> Option<Command> {
     Some(Command::SetLight { change, save })
 }
 
+fn parse_set_key(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    let (mut layer, mut row, mut col, mut code) = (None, None, None, None);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--layer" => layer = Some(args.next()?.parse::<u8>().ok().filter(|&v| v < 4)?),
+            "--row" => {
+                row = Some(
+                    args.next()?
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|&v| v < MATRIX_ROWS)?,
+                )
+            }
+            "--col" => {
+                col = Some(
+                    args.next()?
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|&v| v < MATRIX_COLS)?,
+                )
+            }
+            "--code" => {
+                let text = args.next()?;
+                let Some(c) = parse_code(&text) else {
+                    eprintln!("unknown keycode {text:?} (hex like 0x004C or a name like KC_DEL)");
+                    return None;
+                };
+                if let Err(reason) = check_writable(c) {
+                    eprintln!("keycode {c:#06x} refused: {reason}");
+                    return None;
+                }
+                code = Some(c);
+            }
+            _ => return None,
+        }
+    }
+    Some(Command::SetKey {
+        layer: layer?,
+        row: row?,
+        col: col?,
+        code: code?,
+    })
+}
+
 fn parse_args() -> Option<Command> {
     let mut args = std::env::args().skip(1);
     match args.next()?.as_str() {
@@ -200,6 +262,7 @@ fn parse_args() -> Option<Command> {
                 "profile" => {}
                 "travel" => return parse_set_travel(args),
                 "light" => return parse_set_light(args),
+                "key" => return parse_set_key(args),
                 _ => return None,
             }
             let number: u8 = args.next()?.parse().ok()?;
@@ -248,7 +311,7 @@ fn exit_for(e: &SessionError) -> ExitCode {
 fn main() -> ExitCode {
     let Some(command) = parse_args() else {
         eprintln!(
-            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | travel | set profile <1..3> [--save] | set travel --mode static|rt --actuation <mm> [--press <mm>] [--release <mm>] [--save] | set light [--effect 0..24] [--brightness 0..255] [--speed 0..255] [--hue 0..255 --sat 0..255] [--save] | link [--trace]"
+            "usage: kc_probe list | state [--json] [--trace] | watch <seconds> | profile | travel | set profile <1..3> [--save] | set travel --mode static|rt --actuation <mm> [--press <mm>] [--release <mm>] [--save] | set light [--effect 0..24] [--brightness 0..255] [--speed 0..255] [--hue 0..255 --sat 0..255] [--save] | set key --layer <0..3> --row <0..5> --col <0..15> --code <hex or KC_/RGB_ name> (layer, row, col 0-based) | link [--trace]"
         );
         return ExitCode::from(2);
     };
@@ -271,6 +334,12 @@ fn main() -> ExitCode {
             false,
         ),
         Command::SetLight { change, save } => run(|s| set_light(s, change, save), false),
+        Command::SetKey {
+            layer,
+            row,
+            col,
+            code,
+        } => run(|s| set_key(s, layer, row, col, code), false),
     }
 }
 
@@ -529,6 +598,59 @@ fn set_light(
     println!(
         "saved {}, frames written {}{}",
         out.saved,
+        out.frames_written,
+        if out.unchanged {
+            " (already set, nothing written)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+/// Set when a VIA 05 frame went out (seen on the TX trace).
+static KEY_WRITE_SENT: AtomicBool = AtomicBool::new(false);
+
+fn watch_key_write(direction: FrameDirection, bytes: &[u8]) {
+    if matches!(direction, FrameDirection::Tx) && bytes.first() == Some(&0x05) {
+        KEY_WRITE_SENT.store(true, Ordering::SeqCst);
+    }
+}
+
+fn key_label(code: u16) -> String {
+    format!("{code:#06x} {}", Keycode::decode(code))
+}
+
+fn set_key(
+    session: &mut Session<keychron_k2he::HidapiLink>,
+    layer: u8,
+    row: u8,
+    col: u8,
+    code: u16,
+) -> Result<(), SessionError> {
+    session.set_frame_trace(watch_key_write);
+    let out = set_keycode(session, layer, row, col, code).inspect_err(|e| {
+        let unknown = matches!(
+            e,
+            SessionError::Timeout
+                | SessionError::AmbiguousReply
+                | SessionError::ForeignTraffic
+                | SessionError::BadReport(_)
+                | SessionError::Link(_)
+                | SessionError::VerifyMismatch { .. }
+        );
+        if unknown && KEY_WRITE_SENT.load(Ordering::SeqCst) {
+            eprintln!("the VIA 05 frame was sent: key state unknown, run `kc_probe state`");
+        }
+    })?;
+    println!(
+        "layer {}, row {}, col {} (0-based)",
+        out.layer, out.row, out.col
+    );
+    println!("before: {}", key_label(out.before));
+    println!("after:  {}", key_label(out.after));
+    println!(
+        "frames written {}{}",
         out.frames_written,
         if out.unchanged {
             " (already set, nothing written)"

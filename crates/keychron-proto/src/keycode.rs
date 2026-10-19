@@ -345,3 +345,59 @@ impl fmt::Display for Keycode {
         }
     }
 }
+
+/// QMK `QK_BOOT`, `QK_REBOOT`, `QK_DEBUG_TOGGLE`, `QK_CLEAR_EEPROM` and the rest of the
+/// quantum block live here (public QMK v12 values: 0x7C00 boot, 0x7C01 reboot, 0x7C03
+/// clear EEPROM). A keymap write never puts anything from this range on a key.
+pub const QUANTUM_BLOCK: std::ops::RangeInclusive<u16> = 0x7C00..=0x7DFF;
+
+/// May `code` be written to a key (VIA 05)? Only what this module can name and that is
+/// harmless: KC_NO, KC_TRNS, basic HID keys, `RGB_*` and the K2 HE custom keys. The
+/// quantum block (bootloader jump, EEPROM wipe, debug) is refused explicitly, then every
+/// other code that is not in the list above. The `Err` text says why.
+pub fn check_writable(code: u16) -> Result<(), &'static str> {
+    if QUANTUM_BLOCK.contains(&code) {
+        return Err(
+            "quantum block 0x7C00..=0x7DFF (boot, reboot, clear EEPROM, debug) is never written",
+        );
+    }
+    // Power, sleep and wake keys, and the K2 HE radio keys (BT host 1..3, 2.4G at
+    // 0x7E0B..=0x7E0E) could cut the keyboard off or the host to sleep.
+    if matches!(code, 0x0066 | 0x00A5..=0x00A7) || (0x7E0B..=0x7E0E).contains(&code) {
+        return Err("power, sleep, wake and wireless host keys are never written");
+    }
+    let known = match Keycode::decode(code) {
+        Keycode::No | Keycode::Transparent | Keycode::Basic { .. } | Keycode::Rgb { .. } => true,
+        Keycode::Custom { name, .. } => name.is_some(),
+        _ => false,
+    };
+    if known {
+        Ok(())
+    } else {
+        Err("not a basic, KC_NO, KC_TRNS, RGB or Keychron keycode")
+    }
+}
+
+/// Keycode from a hex or decimal number (`0x004C`) or a QMK name (`KC_DEL`, `RGB_MOD`,
+/// `KC_NO`, `KC_TRNS`, a K2 HE custom name). Names are compared case-insensitively. The
+/// result is not yet checked with [`check_writable`].
+pub fn parse_code(text: &str) -> Option<u16> {
+    let t = text.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return u16::from_str_radix(hex, 16).ok();
+    }
+    if t.bytes().all(|b| b.is_ascii_digit()) && !t.is_empty() {
+        return t.parse().ok();
+    }
+    (0..=u16::MAX)
+        .filter(|&c| {
+            c == 0x0001
+                || c <= 0x00FF
+                || (0x7820..=0x7833).contains(&c)
+                || (0x7E00..=0x7EFF).contains(&c)
+        })
+        .find(|&c| {
+            let k = Keycode::decode(c);
+            !matches!(k, Keycode::Unknown(_)) && k.to_string().eq_ignore_ascii_case(t)
+        })
+}

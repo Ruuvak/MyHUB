@@ -3,7 +3,7 @@
 //! [`Session`] runs the `keychron-proto` protocol over any [`RawLink`]: one frame in
 //! flight, every frame from `Policy::check` -> `CheckedRequest::encode`, reads resent up
 //! to two times after a timeout (once inside a write sequence), writes never resent. The stored policy is read-only; the
-//! writes ([`select_profile`], [`set_travel_global`], [`set_lighting`]) open one tier per call on a copy.
+//! writes ([`select_profile`], [`set_travel_global`], [`set_lighting`], [`set_keycode`]) open one tier per call on a copy.
 //! [`read_snapshot`] reads the whole keyboard state.
 //!
 //! Another configurator (the Keychron launcher) talking to the keyboard at the same time
@@ -23,6 +23,7 @@ mod detail;
 mod discovery;
 mod error;
 mod hid;
+mod keymap;
 mod light;
 mod link;
 mod linkrx;
@@ -38,6 +39,7 @@ pub use detail::{
 pub use discovery::{InterfaceInfo, list_interfaces, list_receiver_interfaces};
 pub use error::SessionError;
 pub use hid::HidapiLink;
+pub use keymap::{KeycodeOutcome, set_keycode};
 pub use light::{
     LightChange, LightOutcome, LightState, read_light_state, set_lighting, set_lighting_with,
 };

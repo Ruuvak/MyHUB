@@ -34,7 +34,7 @@ fn never_send_list_is_forbidden_even_with_every_gate_open() {
 
 #[test]
 fn other_writes_and_unknown_commands_are_not_allowlisted() {
-    let frames: [&[u8]; 14] = [
+    let frames: [&[u8]; 13] = [
         &[0xA9, 0x13, 0x00, 0x02, 0x41, 0x00],
         &[0xA9, 0x15, 0x00, 0x01, 0x00, 0x0E],
         &[0xA9, 0x16, 0x00, 0x03, 0x01],
@@ -43,7 +43,6 @@ fn other_writes_and_unknown_commands_are_not_allowlisted() {
         &[0xA8, 0x02],
         &[0xA8, 0x04, 0xE0],
         &[0xA8, 0x0A, 0x00, 0x01, 0x55, 0xFF, 0xFF],
-        &[0x05, 0x02, 0x05, 0x0A, 0x52, 0x23],
         &[0x06],
         &[0x0F, 0x00],
         &[0xA7, 0x04, 0x01],
@@ -377,4 +376,116 @@ fn reads_past_a_known_size_are_refused_and_unknown_sizes_refuse() {
             "{r:?}"
         );
     }
+}
+
+fn set_key(layer: u8, row: u8, col: u8, code: u16) -> Request {
+    Request::SetKeycode {
+        layer,
+        row,
+        col,
+        code,
+    }
+}
+
+#[test]
+fn set_keycode_encodes_big_endian_and_needs_the_persistent_gate() {
+    let req = set_key(2, 0, 15, 0x004C);
+    assert_eq!(req.tier(), Tier::Persistent);
+    let checked = all_open().check(&req).unwrap();
+    assert_eq!(checked.encode(), pad(&[0x05, 2, 0, 15, 0x00, 0x4C]));
+    assert_eq!(
+        all_open()
+            .check(&set_key(2, 0, 14, 0x7821))
+            .unwrap()
+            .encode(),
+        pad(&[0x05, 2, 0, 14, 0x78, 0x21])
+    );
+    // Bytes 1..=3 are matched, the keycode bytes are not.
+    assert!(checked.matches(&pad(&[0x05, 2, 0, 15, 0x12, 0x34])));
+    assert!(!checked.matches(&pad(&[0x05, 2, 0, 14, 0x00, 0x4C])));
+    // The raw-byte entry gives the same frame.
+    assert_eq!(
+        all_open()
+            .check_bytes(&[0x05, 2, 0, 15, 0x00, 0x4C])
+            .unwrap()
+            .encode(),
+        checked.encode()
+    );
+    for tier in [Tier::Read, Tier::Volatile] {
+        let policy = common::sized(Policy::allowing(tier));
+        assert_eq!(
+            policy.check(&req).unwrap_err(),
+            PolicyError::TierNotEnabled {
+                tier: Tier::Persistent
+            }
+        );
+    }
+}
+
+#[test]
+fn set_keycode_outside_the_matrix_is_refused_before_encode() {
+    let p = all_open();
+    assert!(p.check(&set_key(3, 5, 15, 0x0004)).is_ok());
+    for (req, field) in [
+        (set_key(4, 0, 0, 0x0004), "layer"),
+        (set_key(0, 6, 0, 0x0004), "row"),
+        (set_key(0, 0, 16, 0x0004), "col"),
+    ] {
+        match p.check(&req) {
+            Err(PolicyError::OutOfRange { field: f, .. }) => assert_eq!(f, field),
+            other => panic!("{req:?}: {other:?}"),
+        }
+    }
+    // Without limits from the device layer nothing is sent.
+    let bare = Policy::allowing(Tier::Persistent);
+    assert!(matches!(
+        bare.check(&set_key(0, 0, 0, 0x0004)),
+        Err(PolicyError::LimitUnknown { .. })
+    ));
+}
+
+#[test]
+fn set_keycode_refuses_the_quantum_block_and_unknown_codes() {
+    let p = all_open();
+    // QK_BOOT, QK_REBOOT, QK_DEBUG_TOGGLE, QK_CLEAR_EEPROM and the block edges.
+    for code in [0x7C00, 0x7C01, 0x7C02, 0x7C03, 0x7C77, 0x7DFF] {
+        assert!(
+            matches!(
+                p.check(&set_key(0, 0, 0, code)),
+                Err(PolicyError::Invalid {
+                    field: "keycode",
+                    ..
+                })
+            ),
+            "{code:#06x}"
+        );
+        assert!(
+            p.check_bytes(&[0x05, 0, 0, 0, (code >> 8) as u8, code as u8])
+                .is_err()
+        );
+    }
+    // Unnameable or unsafe: layer keys, mod-taps, undefined basic codes, unnamed custom keys.
+    for code in [
+        0x5223, 0x2004, 0x0002, 0x00A4, 0x7E40, 0x7834, 0xFFFF, 0x7E0B, 0x7E0C, 0x7E0D, 0x7E0E,
+        0x0066, 0x00A5, 0x00A6, 0x00A7,
+    ] {
+        assert!(p.check(&set_key(0, 0, 0, code)).is_err(), "{code:#06x}");
+    }
+    // KC_NO, KC_TRNS, basic, RGB, a named Keychron key.
+    for code in [
+        0x0000, 0x0001, 0x004C, 0x00E7, 0x7820, 0x7821, 0x7833, 0x7E00,
+    ] {
+        assert!(p.check(&set_key(0, 0, 0, code)).is_ok(), "{code:#06x}");
+    }
+}
+
+#[test]
+fn parse_code_reads_hex_and_names() {
+    use keychron_proto::keycode::parse_code;
+    assert_eq!(parse_code("0x004C"), Some(0x004C));
+    assert_eq!(parse_code("KC_DEL"), Some(0x004C));
+    assert_eq!(parse_code("rgb_mod"), Some(0x7821));
+    assert_eq!(parse_code("KC_NO"), Some(0));
+    assert_eq!(parse_code("KC_TRNS"), Some(1));
+    assert_eq!(parse_code("NOPE"), None);
 }

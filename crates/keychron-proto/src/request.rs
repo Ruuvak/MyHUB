@@ -5,6 +5,7 @@
 use serde::Serialize;
 
 use crate::frame::{FRAME_LEN, Frame};
+use crate::keycode;
 use crate::policy::{Policy, PolicyError, Tier};
 
 /// Global effect ids 0..=24 [OBS definition, lighting.md section 4].
@@ -188,6 +189,14 @@ pub enum Request {
     SaveProfile { profile: u8 },
     /// `09 03`.
     SaveLighting,
+    /// `05 layer row col code_hi code_lo`, keycode big-endian (QMK VIA dynamic keymap set
+    /// keycode). Saves to EEPROM at once [INF]. Layer, row and column are 0-based.
+    SetKeycode {
+        layer: u8,
+        row: u8,
+        col: u8,
+        code: u16,
+    },
 }
 
 fn put(bytes: &[u8]) -> Frame {
@@ -205,6 +214,20 @@ fn range(field: &'static str, value: u8, (min, max): (u8, u8)) -> Result<(), Pol
             value: u32::from(value),
             min: u32::from(min),
             max: u32::from(max),
+        })
+    }
+}
+
+/// `value` must be below `limit` (0-based index).
+fn below(field: &'static str, value: u8, limit: u8) -> Result<(), PolicyError> {
+    if value < limit {
+        Ok(())
+    } else {
+        Err(PolicyError::OutOfRange {
+            field,
+            value: u32::from(value),
+            min: 0,
+            max: u32::from(limit).saturating_sub(1),
         })
     }
 }
@@ -243,7 +266,9 @@ impl Request {
             Request::SelectProfile { .. }
             | Request::SetTravelGlobal { .. }
             | Request::SetLight { .. } => Tier::Volatile,
-            Request::SaveProfile { .. } | Request::SaveLighting => Tier::Persistent,
+            Request::SaveProfile { .. } | Request::SaveLighting | Request::SetKeycode { .. } => {
+                Tier::Persistent
+            }
             _ => Tier::Read,
         }
     }
@@ -348,6 +373,25 @@ impl Request {
             Request::SetLight {
                 value: LightValue::Effect(effect),
             } => range("effect", effect, (0, EFFECT_MAX)),
+            Request::SetKeycode {
+                layer,
+                row,
+                col,
+                code,
+            } => {
+                let (Some(layers), Some((rows, cols))) = (p.layer_count, p.matrix) else {
+                    return Err(PolicyError::LimitUnknown {
+                        what: "layer count and matrix",
+                    });
+                };
+                below("layer", layer, layers)?;
+                below("row", row, rows)?;
+                below("col", col, cols)?;
+                keycode::check_writable(code).map_err(|reason| PolicyError::Invalid {
+                    field: "keycode",
+                    reason,
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -430,13 +474,23 @@ impl Request {
             },
             Request::SaveProfile { profile } => put(&[0xA9, 0x1F, profile]),
             Request::SaveLighting => put(&[0x09, 0x03]),
+            Request::SetKeycode {
+                layer,
+                row,
+                col,
+                code,
+            } => {
+                let c = code.to_be_bytes();
+                put(&[0x05, layer, row, col, c[0], c[1]])
+            }
         }
     }
 
     /// Does `reply` answer this request? Byte 0 echoes the command. Where byte 1 is
     /// reply data (A0, A1, A2, A3, VIA 01, 0C, 0D, 11) only byte 0 is compared. The extra
     /// echoed fields follow the launcher: VIA 12 bytes 0..=2, VIA 0E bytes 0..=3, VIA
-    /// 08 03 and 07 03 bytes 0..=2, A9 12 bytes 0..=5. Everything else compares bytes 0
+    /// 08 03 and 07 03 bytes 0..=2, VIA 05 bytes 0..=3 (layer, row, col; the keycode in bytes 4..=5 is
+    /// for the caller to compare), A9 12 bytes 0..=5. Everything else compares bytes 0
     /// and 1.
     ///
     /// There is no sequence number. A9 11 and other unsolicited reports share the
@@ -458,6 +512,7 @@ impl Request {
             Request::GetKeymapBuffer { .. }
             | Request::GetLight { .. }
             | Request::SetLight { .. } => 3,
+            Request::SetKeycode { .. } => 4,
             Request::GetMacroBuffer { .. } => 4,
             Request::GetProfileBuffer { .. } => 6,
             _ => 2,
@@ -523,6 +578,15 @@ impl Request {
                 exact(used, Request::SetLight { value })
             }
             (0x09, 0x03) => exact(2, Request::SaveLighting),
+            (0x05, _) => exact(
+                6,
+                Request::SetKeycode {
+                    layer: f[1],
+                    row: f[2],
+                    col: f[3],
+                    code: u16::from_be_bytes([f[4], f[5]]),
+                },
+            ),
             (0x0C, _) => exact(1, Request::GetMacroCount),
             (0x0D, _) => exact(1, Request::GetMacroBufferSize),
             (0x0E, _) => exact(
@@ -659,7 +723,8 @@ mod tests {
             | Request::SetTravelGlobal { .. }
             | Request::SetLight { .. }
             | Request::SaveProfile { .. }
-            | Request::SaveLighting => {}
+            | Request::SaveLighting
+            | Request::SetKeycode { .. } => {}
         }
     }
 
@@ -739,6 +804,12 @@ mod tests {
             },
             Request::SaveProfile { profile: 2 },
             Request::SaveLighting,
+            Request::SetKeycode {
+                layer: 2,
+                row: 0,
+                col: 15,
+                code: 0x004C,
+            },
         ];
         for r in samples {
             assert_eq!(Request::parse(&r.to_frame()), Ok(r), "{r:?}");

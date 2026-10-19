@@ -10,10 +10,10 @@
 //!    VIA 0x0A (EEPROM reset), VIA 0x0B (bootloader jump), A7 0x15 (bootloader jump),
 //!    every 0xAB (factory test) and 0xBA (receiver DFU).
 //! 2. Allowlist v1, exactly the variants of [`Request`]. Other known writes (A9 13, 15,
-//!    16, 1E, 21; A8 writes; VIA 05, 06, 0F; A7 04, 0C) and unknown commands are
+//!    16, 1E, 21; A8 writes; VIA 06, 0F; A7 04, 0C) and unknown commands are
 //!    [`PolicyError::NotAllowlisted`].
 //! 3. Tier gate. Read is always open. Volatile (RAM: A9 11, A9 14, VIA 07 03) and
-//!    Persistent (flash: A9 1F, VIA 09 03) are opened per call and are independent:
+//!    Persistent (flash: A9 1F, VIA 09 03, VIA 05 single keycode) are opened per call and are independent:
 //!    neither implies the other.
 //! 4. Range checks. The profile count is not hardcoded: the device layer reads it from
 //!    GET_PROFILES_INFO (A9 10, byte 3) and passes it with
