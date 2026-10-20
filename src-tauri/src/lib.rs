@@ -1,23 +1,29 @@
 pub mod backup;
 pub mod device_manager;
 pub mod flyout;
+pub mod hotplug;
 pub mod keychron;
 pub mod settings;
 pub mod sony;
 pub mod tray;
 pub mod updater;
 
+use std::sync::Mutex;
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use device_manager::{
-    DeviceManager, REFRESH_WAIT, SAVE_WAIT, SaveRequest, SaveResult, WRITE_WAIT, WriteOp,
+    DeviceManager, REFRESH_WAIT, SAVE_WAIT, SaveRequest, SaveResult, WRITE_WAIT, WriteOp, lock,
 };
 use keychron::{KEYBOARD_SETTINGS_WAIT, KEYBOARD_WRITE_WAIT, TravelModeArg};
 use myhub_core::{DeviceDetail, DevicePrefs, DeviceSummary};
 use settings::{Settings, SettingsState};
 use sony::{AmbientArg, NcModeArg, SONY_WRITE_WAIT, SonyWrite, ToggleArg};
+
+/// The hotplug registration, dropped on exit.
+struct HotplugState(Mutex<Option<hotplug::Hotplug>>);
 
 const SETTINGS_CHANGED_EVENT: &str = "settings-changed";
 const SELECT_DEVICE_EVENT: &str = "select-device";
@@ -430,7 +436,13 @@ pub fn run() {
                 }
             };
             // Started after the tray so the first status update finds it.
-            app.manage(DeviceManager::start(app.handle().clone()));
+            let devices = DeviceManager::start(app.handle().clone());
+            // After the workers run: a HID arrival wakes the scanners (no-op off Windows).
+            let waker = devices.scan_waker();
+            app.manage(HotplugState(Mutex::new(hotplug::Hotplug::start(
+                move || waker.wake(),
+            ))));
+            app.manage(devices);
             // Without a tray there is no way to bring a hidden window back.
             if !(current.start_minimized || autostarted) || !tray_ok {
                 tray::show_main_window(app.handle());
@@ -499,6 +511,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building MyHUB")
         .run(|app, event| {
+            if let RunEvent::Exit = event
+                && let Some(hot) = app.try_state::<HotplugState>()
+            {
+                // Unregistered before the workers stop.
+                drop(lock(&hot.0).take());
+            }
             if let RunEvent::Exit = event
                 && let Some(devices) = app.try_state::<DeviceManager>()
             {

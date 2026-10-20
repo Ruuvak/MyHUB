@@ -32,6 +32,7 @@ const previewDefaults: Settings = {
   launchAtLogin: true,
   allowDeviceWrites: false,
   restoreLastMode: true,
+  modules: { logitech: true, sony: true, keychron: true },
 };
 let previewSettings: Settings = { ...previewDefaults };
 

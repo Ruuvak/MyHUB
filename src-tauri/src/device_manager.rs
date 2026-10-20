@@ -45,6 +45,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::backup;
+use crate::hotplug;
 use crate::keychron::{KeyboardWrite, KeychronCommand, KeychronWorker, TravelModeArg};
 use crate::settings::{self, Language, Settings, SettingsState};
 use crate::sony::{SONY_WRITE_WAIT, SonyCommand, SonyWorker, SonyWrite};
@@ -53,8 +54,11 @@ use crate::tray;
 pub const DEVICES_CHANGED_EVENT: &str = "devices-changed";
 pub const DEVICE_DETAIL_CHANGED_EVENT: &str = "device-detail-changed";
 
-/// Pause between receiver scans while no session is open.
-const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// Pause between receiver scans while no session is open and no hotplug notification is
+/// registered. Each scan is a full HID enumeration, which is expensive on Windows and
+/// glitched system audio when run every 2 s [OBS]; a Wake command cuts the pause short.
+/// With hotplug active the pause is `hotplug::HOTPLUG_FALLBACK` (see `hotplug::scan_interval`).
+const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 /// How long one pump of the link waits for events.
 const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 /// Pause before the first retry of a failed snapshot read; it doubles per
@@ -66,8 +70,11 @@ const READ_RETRY_MAX: Duration = Duration::from_secs(300);
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 /// How often the worker body is restarted after panics before it gives up.
 const MAX_RESTARTS: u32 = 3;
-/// Interval of the battery status request while the mouse is connected.
-const BATTERY_REFRESH: Duration = Duration::from_secs(60);
+/// Fallback interval of the battery status request while the mouse is connected. The
+/// mouse sends 0x1004 events on its own [OBS], so the request is only a safety net; it is
+/// also skipped when an event arrived within this window (`last_battery` is reset by
+/// every event).
+const BATTERY_REFRESH: Duration = Duration::from_secs(15 * 60);
 /// How long `refresh_device` waits for the worker.
 pub const REFRESH_WAIT: Duration = Duration::from_secs(5);
 /// How long a write command waits for the worker (rate limit and device I/O
@@ -357,6 +364,21 @@ impl Router {
     fn wake_all(&self) {
         let _ = self.logitech.send(Command::Wake);
         let _ = self.sony.send(SonyCommand::Wake);
+        let _ = self.keychron.send(KeychronCommand::Wake);
+    }
+}
+
+/// Wakes the two workers that scan for their device (the G502 and the keyboard), e.g. on a
+/// HID arrival. A wake ends their idle pause at once and costs nothing else.
+#[derive(Clone)]
+pub struct ScanWaker {
+    logitech: Sender<Command>,
+    keychron: Sender<KeychronCommand>,
+}
+
+impl ScanWaker {
+    pub fn wake(&self) {
+        let _ = self.logitech.send(Command::Wake);
         let _ = self.keychron.send(KeychronCommand::Wake);
     }
 }
@@ -663,6 +685,14 @@ impl DeviceManager {
         self.router.keyboard_write(id, || {
             KeyboardWrite::lighting(effect, brightness, speed, hue, saturation)
         })
+    }
+
+    /// A handle that wakes the scanning workers from another thread (hotplug).
+    pub fn scan_waker(&self) -> ScanWaker {
+        ScanWaker {
+            logitech: self.router.logitech.clone(),
+            keychron: self.router.keychron.clone(),
+        }
     }
 
     /// Tells the workers that the settings changed, so they publish the detail
@@ -1274,6 +1304,10 @@ struct Device<L: HidLink> {
     spy_stale: Arc<AtomicBool>,
     /// Earliest time of the next stop attempt from the pass loop.
     spy_stale_retry_at: Instant,
+    /// Parking (module off, mouse still marked host): attempts made so far.
+    park_attempts: u8,
+    /// The last attempt is waiting for the link to come back.
+    park_tried: bool,
     /// The spy must be started again after the read that follows a link-up with
     /// the host mark set.
     spy_restart_due: bool,
@@ -1325,6 +1359,8 @@ impl<L: HidLink> Device<L> {
             spy_mark: Arc::new(AtomicBool::new(false)),
             spy_stale: Arc::new(AtomicBool::new(false)),
             spy_stale_retry_at: now,
+            park_attempts: 0,
+            park_tried: false,
             spy_restart_due: false,
             spy_mask: 0,
             remembered_profile: None,
@@ -1702,6 +1738,8 @@ impl<L: HidLink> Device<L> {
                 continue;
             }
             if let Some(status) = parse_battery_status(&payload) {
+                // An event is as good as a read: the fallback timer starts over.
+                self.last_battery = now;
                 self.set_battery_status(status, &payload);
             }
         }
@@ -2526,6 +2564,79 @@ fn return_blind<L: HidLink>(device: &mut Device<L>) -> Result<(), LinkLost> {
     device.return_to_onboard()
 }
 
+/// Attempts to return the mouse while parking, per park.
+const PARK_ATTEMPTS: u8 = 3;
+
+/// Module switched off: one step of handing a host-marked mouse back to onboard
+/// mode through the existing return path (no setting needed, nothing stored in the
+/// prefs). Returns `true` while the session must be kept: the mark is set and the
+/// mouse is unreachable, so the step only listens (no frames sent) until the link
+/// is back, then rediscovers once and tries the return again. The session is
+/// dropped (`false`) once the mark is clear, the link is lost or the attempts are
+/// used up.
+fn park_step<L: HidLink>(device: &mut Option<Device<L>>) -> bool {
+    let Some(d) = device.as_mut() else {
+        return false;
+    };
+    if !d.host_by_us() || d.park_attempts >= PARK_ATTEMPTS {
+        *device = None;
+        return false;
+    }
+    let listen = |d: &mut Device<L>| d.session.poll_events(d.poll_timeout);
+    if d.link_known_down() {
+        d.park_tried = false;
+        if let Err(e) = listen(d) {
+            eprintln!("myhub: link lost while switching the module off: {e}");
+            *device = None;
+            return false;
+        }
+        return true;
+    }
+    if d.park_tried && !d.session.needs_rediscovery() {
+        if let Err(e) = listen(d) {
+            eprintln!("myhub: link lost while switching the module off: {e}");
+            *device = None;
+            return false;
+        }
+        return true;
+    }
+    d.park_attempts += 1;
+    d.park_tried = true;
+    if d.session.needs_rediscovery() {
+        if let Err(e) = d.session.discover() {
+            eprintln!("myhub: cannot return the mouse to onboard mode yet: discovery failed: {e}");
+            return true;
+        }
+        d.link_up = true;
+    }
+    if let Err(LinkLost(reason)) = d.return_to_onboard() {
+        eprintln!("myhub: link lost while switching the module off: {reason}");
+        *device = None;
+        return false;
+    }
+    if d.host_by_us() {
+        return true;
+    }
+    *device = None;
+    false
+}
+
+/// Answers a command without touching the device (module off).
+fn refuse_command(command: Command) {
+    match command {
+        Command::Refresh { reply, .. } => {
+            let _ = reply.send(None);
+        }
+        Command::Write { reply, .. } | Command::Mode { reply, .. } => {
+            let _ = reply.send(Err("disconnected".to_owned()));
+        }
+        Command::Save { reply, .. } => {
+            let _ = reply.send(Err("disconnected".to_owned()));
+        }
+        Command::SettingsChanged | Command::Wake => {}
+    }
+}
+
 struct Worker {
     app: AppHandle,
     config_dir: Option<PathBuf>,
@@ -2722,10 +2833,30 @@ impl Worker {
     fn run_loop(&mut self) {
         let mut device: Option<Device<_>> = None;
         while !self.stopping() {
+            if !self.module_on() {
+                // Module off: hand the mouse back, drop everything, then idle
+                // without any I/O until the switch comes on again.
+                if self.published() {
+                    self.publish(None, true);
+                }
+                if park_step(&mut device) {
+                    // The mouse is still marked host and unreachable: keep the
+                    // session and only listen for the link coming back.
+                    self.answer_while_parking();
+                    continue;
+                }
+                self.api = None;
+                self.wait_while_off();
+                continue;
+            }
+            if let Some(kept) = device.as_mut() {
+                kept.park_attempts = 0;
+                kept.park_tried = false;
+            }
             let Some(connected) = device.as_mut() else {
                 device = self.try_open();
                 if device.is_none() {
-                    self.wait(SCAN_INTERVAL);
+                    self.wait(hotplug::scan_interval(IDLE_SCAN_INTERVAL));
                 }
                 continue;
             };
@@ -2749,11 +2880,24 @@ impl Worker {
     fn serve(&mut self, device: &mut Device<HidapiLink>) -> Result<(), LinkLost> {
         // All queued refreshes share one read and one answer.
         let mut pending: Vec<(String, Sender<Option<DeviceDetail>>)> = Vec::new();
+        let mut off = false;
         let mut republish = false;
         while let Ok(command) = self.commands.try_recv() {
+            if off {
+                // The module was switched off: nothing queued behind it runs.
+                refuse_command(command);
+                continue;
+            }
             match command {
                 Command::Refresh { id, reply } => pending.push((id, reply)),
                 Command::SettingsChanged => {
+                    if !self.module_on() {
+                        off = true;
+                        for (_, reply) in pending.drain(..) {
+                            let _ = reply.send(None);
+                        }
+                        continue;
+                    }
                     republish = true;
                     if !self.settings().allow_device_writes {
                         // Writes were turned off: hand the mode back.
@@ -2862,6 +3006,9 @@ impl Worker {
                 Command::Wake => {}
             }
         }
+        if off {
+            return Ok(());
+        }
         if republish && let Some(detail) = device.detail() {
             self.publish(Some(detail), true);
         }
@@ -2898,9 +3045,38 @@ impl Worker {
         Ok(())
     }
 
-    /// Sleeps up to `duration`, answering refresh commands with "nothing"
-    /// because there is no session to read from.
+    /// While parking: refuses queued commands (no I/O); a settings change is seen by
+    /// the loop through the flag.
+    fn answer_while_parking(&self) {
+        while let Ok(command) = self.commands.try_recv() {
+            refuse_command(command);
+        }
+    }
+
+    fn module_on(&self) -> bool {
+        self.app
+            .try_state::<SettingsState>()
+            .is_none_or(|s| s.modules().logitech)
+    }
+
+    fn published(&self) -> bool {
+        lock(&self.state).find(DEVICE_ID).is_some()
+    }
+
+    /// Idle while the module is off: no I/O, ends when the switch is on again
+    /// (a settings change) or on shutdown. A hotplug wake does not end it.
+    fn wait_while_off(&self) {
+        self.wait_inner(Duration::from_secs(3600), true);
+    }
+
     fn wait(&self, duration: Duration) {
+        self.wait_inner(duration, false);
+    }
+
+    /// Sleeps up to `duration`, answering refresh commands with "nothing"
+    /// because there is no session to read from. With `off` a wake is ignored
+    /// and a settings change that turns the module on ends the sleep.
+    fn wait_inner(&self, duration: Duration, off: bool) {
         let deadline = Instant::now() + duration;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -2935,8 +3111,17 @@ impl Worker {
                     };
                     let _ = reply.send(Err(code.to_owned()));
                 }
-                Ok(Command::SettingsChanged) => {}
-                Ok(Command::Wake) => return,
+                Ok(Command::SettingsChanged) => {
+                    // The switch flipped: the idle ends so the loop can follow it.
+                    if self.module_on() == off {
+                        return;
+                    }
+                }
+                Ok(Command::Wake) => {
+                    if !off {
+                        return;
+                    }
+                }
                 Err(_) => return,
             }
         }
@@ -3473,7 +3658,7 @@ mod tests {
     }
 
     #[test]
-    fn battery_is_requested_every_minute() {
+    fn battery_is_requested_as_a_fallback_only() {
         let (mut device, handle) = mock_device();
         step(&mut device);
         let writes = handle.borrow().writes;
@@ -3483,6 +3668,24 @@ mod tests {
         // Due: one 0x1004 fn1 request, reply `37 04` (55 %) from the log.
         let later = Instant::now() + BATTERY_REFRESH;
         device.step(later).expect("step");
+        assert_eq!(handle.borrow().writes, writes + 1);
+    }
+
+    #[test]
+    fn a_battery_event_restarts_the_fallback_timer() {
+        let (mut device, handle) = mock_device();
+        step(&mut device);
+        let t0 = Instant::now();
+        let ten_min = Duration::from_secs(600);
+        // An event 10 minutes in is processed and restarts the window.
+        handle.borrow_mut().inbox.push_back(battery_broadcast(50));
+        device.step(t0 + ten_min).expect("step");
+        let writes = handle.borrow().writes;
+        // 20 minutes after the connect read, but only 10 after the event: no request.
+        device.step(t0 + ten_min * 2).expect("step");
+        assert_eq!(handle.borrow().writes, writes);
+        // A full window after the event: one request.
+        device.step(t0 + ten_min + BATTERY_REFRESH).expect("step");
         assert_eq!(handle.borrow().writes, writes + 1);
     }
 
@@ -4588,6 +4791,71 @@ mod tests {
         let writes = handle.borrow().writes;
         device.return_to_onboard().unwrap();
         assert_eq!(handle.borrow().writes, writes);
+    }
+
+    #[test]
+    fn a_switched_off_module_returns_the_mouse_and_then_sends_nothing() {
+        let (device, handle) = read_device();
+        onboard_mouse(&handle);
+        accept_dpi(&handle, 1200, 1200);
+        let mut device = Some(device);
+        device
+            .as_mut()
+            .unwrap()
+            .enter_temporary(ID, true, None)
+            .expect("enter");
+        assert!(device.as_ref().unwrap().host_by_us());
+
+        let from = handle.borrow().sent.len();
+        assert!(!park_step(&mut device), "done in one step");
+        assert!(device.is_none(), "the session is dropped");
+        assert_eq!(
+            hex_frames(&handle, from),
+            [
+                "11010a2b00000000000000000000000000000000",
+                "1101091b01000000000000000000000000000000",
+                "1101092b00000000000000000000000000000000",
+            ]
+        );
+        let writes = handle.borrow().writes;
+        assert!(!park_step(&mut device));
+        assert_eq!(handle.borrow().writes, writes, "no further frames");
+    }
+
+    #[test]
+    fn a_parked_mouse_that_is_unreachable_keeps_its_session_until_the_link_returns() {
+        let (device, handle) = read_device();
+        onboard_mouse(&handle);
+        accept_dpi(&handle, 1200, 1200);
+        let mut device = Some(device);
+        device
+            .as_mut()
+            .unwrap()
+            .enter_temporary(ID, true, None)
+            .expect("enter");
+        // The mouse is switched off: link down.
+        handle.borrow_mut().inbox.push_back(hex("10014111629f40"));
+        let writes = handle.borrow().writes;
+        for _ in 0..3 {
+            assert!(park_step(&mut device), "session kept while unreachable");
+        }
+        assert!(device.as_ref().unwrap().host_by_us());
+        assert_eq!(handle.borrow().writes, writes, "nothing sent while down");
+
+        // Switched on again: the return runs, then the session goes.
+        let from = handle.borrow().sent.len();
+        handle.borrow_mut().inbox.push_back(hex("10014111a29f40"));
+        let mut steps = 0;
+        while park_step(&mut device) {
+            steps += 1;
+            assert!(steps < 6, "parking did not finish");
+        }
+        assert!(device.is_none());
+        let sent = hex_frames(&handle, from);
+        assert!(
+            sent.contains(&"1101091b01000000000000000000000000000000".to_string()),
+            "{sent:?}"
+        );
     }
 
     #[test]

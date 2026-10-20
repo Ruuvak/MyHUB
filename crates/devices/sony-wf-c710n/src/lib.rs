@@ -18,7 +18,7 @@ mod session;
 mod snapshot;
 mod writes;
 
-use myhub_rfcomm::{PairedDevice, RfcommError, RfcommLink, ServiceUuid, connect};
+use myhub_rfcomm::{BtAddress, PairedDevice, RfcommError, RfcommLink, ServiceUuid, connect};
 
 pub use describe::describe;
 pub use detail::to_detail;
@@ -66,6 +66,67 @@ pub fn candidates() -> Result<Vec<(PairedDevice, Match)>, RfcommError> {
     Ok(out)
 }
 
+/// Finds the headset for the background worker with as little radio use as possible.
+///
+/// Unlike [`candidates`] it matches by name first and asks for the MDR service
+/// (SDP, a radio operation on Windows) only for a device that is connected, did not
+/// match by name and was not asked before in this run.
+#[derive(Debug, Default)]
+pub struct Finder {
+    /// Address and the answer of `offers_service`, one entry per device asked.
+    asked: Vec<(BtAddress, bool)>,
+}
+
+impl Finder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The headset among the paired devices, `None` when there is none. The device
+    /// may report `connected == false`: then nothing may be opened.
+    pub fn find(&mut self) -> Result<Option<PairedDevice>, RfcommError> {
+        self.find_with(myhub_rfcomm::list_paired, |d| {
+            myhub_rfcomm::offers_service(d, &MDR_SERVICE_UUID).ok()
+        })
+    }
+
+    /// [`Finder::find`] with the listing and the service query injected.
+    pub fn find_with(
+        &mut self,
+        list: impl FnOnce() -> Result<Vec<PairedDevice>, RfcommError>,
+        mut offers: impl FnMut(&PairedDevice) -> Option<bool>,
+    ) -> Result<Option<PairedDevice>, RfcommError> {
+        let devices = list()?;
+        // A connected name match wins over a disconnected one.
+        let named = devices
+            .iter()
+            .position(|d| name_matches(&d.name) && d.connected)
+            .or_else(|| devices.iter().position(|d| name_matches(&d.name)));
+        if let Some(i) = named {
+            return Ok(devices.into_iter().nth(i));
+        }
+        for device in devices.into_iter().filter(|d| d.connected) {
+            let address = device.address();
+            let known = self.asked.iter().find(|(a, _)| *a == address).map(|e| e.1);
+            let offered = match known {
+                Some(answer) => answer,
+                // An error is not an answer: ask again on the next run.
+                None => match offers(&device) {
+                    Some(answer) => {
+                        self.asked.push((address, answer));
+                        answer
+                    }
+                    None => false,
+                },
+            };
+            if offered {
+                return Ok(Some(device));
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Why a paired device is a candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Match {
@@ -77,4 +138,86 @@ pub struct Match {
 pub fn open(device: &PairedDevice) -> Result<Session<RfcommLink>, SessionError> {
     let link = connect(device, &MDR_SERVICE_UUID)?;
     Ok(Session::new(link))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(name: &str, tag: u64, connected: bool) -> PairedDevice {
+        PairedDevice::new(name.to_owned(), BtAddress::new(tag), connected)
+    }
+
+    #[test]
+    fn the_service_is_asked_only_for_connected_devices_that_did_not_match_by_name() {
+        let mut finder = Finder::new();
+        let mut asked = Vec::new();
+        let list = || {
+            Ok(vec![
+                device("Phone", 1, false),
+                device("Pad", 2, true),
+                device("Buds", 3, true),
+            ])
+        };
+        let found = finder
+            .find_with(list, |d| {
+                asked.push(d.address());
+                Some(d.address() == BtAddress::new(3))
+            })
+            .unwrap();
+        assert_eq!(found.map(|d| d.address()), Some(BtAddress::new(3)));
+        // The disconnected phone is never asked.
+        assert_eq!(asked, vec![BtAddress::new(2), BtAddress::new(3)]);
+    }
+
+    #[test]
+    fn a_connected_name_match_beats_a_disconnected_one_and_errors_are_not_cached() {
+        let mut finder = Finder::new();
+        let list = || {
+            Ok(vec![
+                device("Sony WF-C710N", 1, false),
+                device("Sony WF-C710N", 2, true),
+            ])
+        };
+        let found = finder.find_with(list, |_| None).unwrap().unwrap();
+        assert_eq!(found.address(), BtAddress::new(2));
+        let mut calls = 0;
+        for _ in 0..2 {
+            let r = finder
+                .find_with(
+                    || Ok(vec![device("Pad", 5, true)]),
+                    |_| {
+                        calls += 1;
+                        None
+                    },
+                )
+                .unwrap();
+            assert!(r.is_none());
+        }
+        assert_eq!(calls, 2, "a failed query is asked again");
+    }
+
+    #[test]
+    fn the_service_answer_is_cached_and_a_name_match_needs_no_query() {
+        let mut finder = Finder::new();
+        let mut calls = 0;
+        let list = || Ok(vec![device("Pad", 2, true), device("Buds", 3, true)]);
+        for _ in 0..3 {
+            assert!(
+                finder
+                    .find_with(list, |_| {
+                        calls += 1;
+                        Some(false)
+                    })
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(calls, 2, "each device once per run");
+        let named = vec![device("Pad", 2, true), device("Sony WF-C710N", 4, false)];
+        let found = finder
+            .find_with(|| Ok(named), |_| panic!("no query for a name match"))
+            .unwrap();
+        assert_eq!(found.map(|d| d.connected), Some(false));
+    }
 }

@@ -36,7 +36,7 @@ pub use cache::{KeyboardCache, cache_path};
 pub use detail::{
     PROTOCOL_LINK, TRANSPORT_RECEIVER, TRANSPORT_USB, cache_of, to_detail, to_receiver_detail,
 };
-pub use discovery::{InterfaceInfo, list_interfaces, list_receiver_interfaces};
+pub use discovery::{InterfaceInfo, Presence, list_interfaces, list_receiver_interfaces, presence};
 pub use error::SessionError;
 pub use hid::HidapiLink;
 pub use keymap::{KeycodeOutcome, set_keycode};

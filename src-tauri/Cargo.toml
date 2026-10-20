@@ -31,3 +31,7 @@ tauri-plugin-updater = { version = "2.14.0", default-features = false, features 
 
 [dev-dependencies]
 keychron-proto = { workspace = true }
+
+# Hotplug notification (src/hotplug.rs); same version as crates/rfcomm, already in Cargo.lock.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation"] }

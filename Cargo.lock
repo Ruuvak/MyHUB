@@ -2299,6 +2299,7 @@ dependencies = [
  "tauri-plugin-positioner",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

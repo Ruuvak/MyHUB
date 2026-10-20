@@ -66,8 +66,7 @@ pub struct BtAddress(u64);
 
 impl BtAddress {
     /// `raw` holds the 48 address bits, most significant byte first when printed.
-    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
-    pub(crate) fn new(raw: u64) -> Self {
+    pub fn new(raw: u64) -> Self {
         Self(raw & 0xFFFF_FFFF_FFFF)
     }
 
@@ -107,8 +106,8 @@ pub struct PairedDevice {
 }
 
 impl PairedDevice {
-    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
-    pub(crate) fn new(name: String, address: BtAddress, connected: bool) -> Self {
+    /// Public so callers can build devices for tests; the backends build the real ones.
+    pub fn new(name: String, address: BtAddress, connected: bool) -> Self {
         Self {
             name,
             connected,

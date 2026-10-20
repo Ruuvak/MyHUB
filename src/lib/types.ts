@@ -14,6 +14,14 @@ export interface Settings {
   allowDeviceWrites: boolean;
   /** After start and reconnect, return to the last mode and DPI settings. Needs allowDeviceWrites. Default true. */
   restoreLastMode: boolean;
+  /** Device families MyHUB talks to. A family that is off touches no hardware. Default all true. */
+  modules: ModuleSettings;
+}
+
+export interface ModuleSettings {
+  logitech: boolean;
+  sony: boolean;
+  keychron: boolean;
 }
 
 /** Last values the user applied to a device, stored on the PC. */

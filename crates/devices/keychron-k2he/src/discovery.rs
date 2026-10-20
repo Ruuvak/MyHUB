@@ -124,13 +124,39 @@ pub fn list_receiver_interfaces() -> Result<Vec<InterfaceInfo>, SessionError> {
     list_for(Target::Receiver)
 }
 
+/// Which of the keyboard (USB) and the Keychron Link receiver have a matching raw HID
+/// interface listed right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    pub keyboard: bool,
+    pub receiver: bool,
+}
+
+/// Both answers from ONE enumeration (one `HidApi`). Full enumeration is expensive on
+/// Windows, so a caller that needs both asks here instead of calling the two list
+/// functions. Opens nothing.
+pub fn presence() -> Result<Presence, SessionError> {
+    let api = new_api()?;
+    let any_matched = |target| list_in(&api, target).iter().any(|i| i.matched);
+    Ok(Presence {
+        keyboard: any_matched(Target::Keyboard),
+        receiver: any_matched(Target::Receiver),
+    })
+}
+
+fn new_api() -> Result<HidApi, SessionError> {
+    Ok(HidApi::new().map_err(|_| LinkError::Hid("could not enumerate HID devices".into()))?)
+}
+
 fn list_for(target: Target) -> Result<Vec<InterfaceInfo>, SessionError> {
-    let api =
-        HidApi::new().map_err(|_| LinkError::Hid("could not enumerate HID devices".into()))?;
+    Ok(list_in(&new_api()?, target))
+}
+
+fn list_in(api: &HidApi, target: Target) -> Vec<InterfaceInfo> {
     let (pid, fallback) = ids(target);
-    let entries = enumerate(&api, pid);
+    let entries = enumerate(api, pid);
     let chosen = select(&entries, fallback).unwrap_or_default();
-    Ok(entries
+    entries
         .iter()
         .enumerate()
         .map(|(i, e)| InterfaceInfo {
@@ -140,7 +166,7 @@ fn list_for(target: Target) -> Result<Vec<InterfaceInfo>, SessionError> {
             product: e.product.clone(),
             matched: chosen.contains(&i),
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]

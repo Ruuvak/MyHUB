@@ -11,7 +11,7 @@ export function SwitchRow({
   onChange,
 }: {
   label: string;
-  hint: string;
+  hint?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
@@ -25,11 +25,13 @@ export function SwitchRow({
         <div id={labelId} className={cx("text-base font-medium text-text", disabled && "opacity-60")}>
           {label}
         </div>
-        <div id={hintId} className="text-sm text-text-muted">
-          {hint}
-        </div>
+        {hint ? (
+          <div id={hintId} className="text-sm text-text-muted">
+            {hint}
+          </div>
+        ) : null}
       </div>
-      <Switch checked={checked} onChange={onChange} labelledBy={labelId} describedBy={hintId} disabled={disabled} />
+      <Switch checked={checked} onChange={onChange} labelledBy={labelId} describedBy={hint ? hintId : undefined} disabled={disabled} />
     </div>
   );
 }

@@ -23,11 +23,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use myhub_core::{Connection, DeviceDetail};
-use myhub_rfcomm::{RfcommError, RfcommLink};
+use myhub_rfcomm::{PairedDevice, RfcommError, RfcommLink};
 use serde::Deserialize;
 use sony_wf_c710n::{
-    ALERT_WAIT, AmbientMode, Applied, DROP_WAIT, Item, MultipointOutcome, NcAsmMode, REPLY_TIMEOUT,
-    Session, SessionError, Snapshot, VERIFY_WAIT, WriteError, candidates, open, read_snapshot,
+    ALERT_WAIT, AmbientMode, Applied, DROP_WAIT, Finder, Item, MultipointOutcome, NcAsmMode,
+    REPLY_TIMEOUT, Session, SessionError, Snapshot, VERIFY_WAIT, WriteError, open, read_snapshot,
     reread, to_detail,
 };
 
@@ -36,23 +36,26 @@ use tauri::Manager;
 use crate::device_manager::{FlashFlag, ManagerState, Slot, clock_ms, lock, publish_slot};
 use crate::settings::SettingsState;
 
-/// Pause between scans while no headset is paired or the first connect fails.
-const SCAN_INTERVAL: Duration = Duration::from_secs(10);
-/// Pauses after a lost link: first 2 s, then 5 s, then [`SCAN_INTERVAL`].
+// Radio use: an RFCOMM connect to buds that are not connected (in the case) pages the
+// device until it times out, and SDP queries do the same. Intel Bluetooth driver
+// activity is a known source of DPC latency spikes [INF], and the user heard system
+// audio pop about once a minute while this worker retried [OBS]. So the worker opens a
+// link only while the paired device reports connected (ACL up), and otherwise only
+// reads the local paired list, which uses no radio.
+/// Pause between local presence checks while the headset is not connected.
+const PRESENCE_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+/// Pauses between connect attempts while the device reports connected but the RFCOMM
+/// connect fails: 2 s, 5 s, then at most one attempt per minute.
 const RECONNECT_DELAYS: [Duration; 3] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
-    SCAN_INTERVAL,
+    Duration::from_secs(60),
 ];
 /// One transport read of the serving loop; also the latency of a refresh command
 /// and of shutdown.
 const POLL_MS: u32 = 200;
 /// Interval of the battery request while connected.
 const BATTERY_REFRESH: Duration = Duration::from_secs(60);
-/// Consecutive failed connects after which the retry interval grows to [`LONG_SCAN_INTERVAL`].
-const FAILS_BEFORE_LONG: u32 = 3;
-/// Retry interval while the headset stays unreachable (buds in the case).
-const LONG_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Least time between two writes to the headset.
 const WRITE_INTERVAL: Duration = Duration::from_millis(250);
@@ -229,13 +232,20 @@ pub fn error_code(e: &WriteError) -> String {
 enum ConnectError {
     /// This platform has no RFCOMM backend: the worker stops.
     Unsupported,
-    /// Anything else; the text is logged once per distinct message.
+    /// The headset is not paired or the paired device reports not connected: nothing
+    /// was opened. The text is logged once per distinct message.
+    NotConnected(String),
+    /// A connect was attempted and failed; the text is logged once per distinct message.
     Failed(String),
+    /// The module is switched off: nothing was listed or opened.
+    Disabled,
 }
 
 enum Outcome {
     Stopped,
     Lost(String),
+    /// The module was switched off: the session is closed, nothing is published.
+    Disabled,
 }
 
 pub struct SonyWorker {
@@ -286,12 +296,13 @@ impl SonyWorker {
     }
 
     fn run_loop(&mut self) {
-        // Index into RECONNECT_DELAYS: starts at the slow scan, restarts after a drop.
-        let mut attempt = RECONNECT_DELAYS.len() - 1;
+        // Index into RECONNECT_DELAYS: restarts after a drop and while not connected.
+        let mut attempt = 0;
         let mut last_error: Option<String> = None;
-        let mut fails = 0u32;
+        let mut finder = Finder::new();
         while !self.stopping() {
-            match self.connect() {
+            let mut delay = None;
+            match connect_when_enabled(self.module_on(), || finder.find(), open_session) {
                 Ok((mut session, mut snapshot)) => {
                     last_error = None;
                     eprintln!("myhub: headset connected");
@@ -302,60 +313,63 @@ impl SonyWorker {
                     drop(session);
                     match outcome {
                         Outcome::Stopped => return,
+                        Outcome::Disabled => {
+                            eprintln!("myhub: headset module off");
+                            attempt = 0;
+                            continue;
+                        }
                         Outcome::Lost(reason) => {
                             eprintln!("myhub: headset link lost: {reason}");
                             self.publish(self.stamped(&snapshot, false, stamp), false);
                             attempt = 0;
-                            fails = 0;
                         }
                     }
+                }
+                Err(ConnectError::Disabled) => {
+                    last_error = None;
+                    attempt = 0;
+                    if lock(&self.state).find(sony_wf_c710n::DEVICE_ID).is_some() {
+                        publish_slot(
+                            &self.app,
+                            &self.state,
+                            self.stopping(),
+                            Slot::Sony,
+                            None,
+                            true,
+                        );
+                    }
+                    self.wait_while_off();
+                    continue;
                 }
                 Err(ConnectError::Unsupported) => {
                     eprintln!("myhub: headset support is not available on this platform");
                     return;
                 }
+                Err(ConnectError::NotConnected(message)) => {
+                    if last_error.as_deref() != Some(message.as_str()) {
+                        eprintln!("myhub: headset not connected: {message}");
+                        last_error = Some(message);
+                    }
+                    // Local check only; the first attempt after it comes without delay.
+                    attempt = 0;
+                    delay = Some(PRESENCE_CHECK_INTERVAL);
+                }
                 Err(ConnectError::Failed(message)) => {
-                    fails += 1;
                     if last_error.as_deref() != Some(message.as_str()) {
                         eprintln!("myhub: headset not connected: {message}");
                         last_error = Some(message);
                     }
                 }
             }
-            let delay = if fails >= FAILS_BEFORE_LONG {
-                LONG_SCAN_INTERVAL
-            } else {
-                RECONNECT_DELAYS[attempt]
-            };
-            // A refresh command for the headset ends the pause and the long back off.
+            let delay = delay.unwrap_or(RECONNECT_DELAYS[attempt]);
+            // A refresh command for the headset ends the pause and the back off.
             if self.wait(delay) {
-                fails = 0;
                 attempt = 0;
                 continue;
             }
             attempt = (attempt + 1).min(RECONNECT_DELAYS.len() - 1);
         }
     }
-
-    /// Finds the headset among the paired devices, connects and reads the snapshot.
-    fn connect(&self) -> Result<(Session<RfcommLink>, Snapshot), ConnectError> {
-        let found = match candidates() {
-            Ok(found) => found,
-            Err(RfcommError::Unsupported) => return Err(ConnectError::Unsupported),
-            Err(e) => return Err(ConnectError::Failed(e.to_string())),
-        };
-        let Some((device, _)) = found.into_iter().next() else {
-            return Err(ConnectError::Failed("no paired WF-C710N".to_owned()));
-        };
-        let mut session = open(&device).map_err(|e| match e {
-            SessionError::Transport(RfcommError::Unsupported) => ConnectError::Unsupported,
-            other => ConnectError::Failed(other.to_string()),
-        })?;
-        let snapshot =
-            read_snapshot(&mut session).map_err(|e| ConnectError::Failed(e.to_string()))?;
-        Ok((session, snapshot))
-    }
-
     /// Polls the session until shutdown or a lost link, publishing every change.
     fn serve(
         &self,
@@ -380,6 +394,15 @@ impl SonyWorker {
                     SonyCommand::SettingsChanged => settings_changed = true,
                     SonyCommand::Wake => {}
                 }
+            }
+            // Switched off since the last pass: queued writes are refused, a write that
+            // already started has finished (they run one at a time in this thread).
+            if !self.module_on() {
+                for (_, _, reply) in writes {
+                    let _ = reply.send(Err("disconnected".to_owned()));
+                }
+                answer_all(replies, None);
+                return Outcome::Disabled;
             }
             let mut writes = writes.into_iter();
             while let Some((op, deadline, reply)) = writes.next() {
@@ -453,6 +476,34 @@ impl SonyWorker {
             }
         }
         Outcome::Stopped
+    }
+
+    fn module_on(&self) -> bool {
+        self.app
+            .try_state::<SettingsState>()
+            .is_none_or(|s| s.modules().sony)
+    }
+
+    /// Idle while the module is off: no listing, no socket. Ends when the switch is on
+    /// again (a settings change) or on shutdown. Refresh and write get an answer.
+    fn wait_while_off(&self) {
+        while !self.stopping() {
+            match self.commands.recv_timeout(Duration::from_millis(250)) {
+                Ok(SonyCommand::Refresh { reply }) => {
+                    let _ = reply.send(None);
+                }
+                Ok(SonyCommand::Write { reply, .. }) => {
+                    let _ = reply.send(Err("disconnected".to_owned()));
+                }
+                Ok(SonyCommand::SettingsChanged) => {
+                    if self.module_on() {
+                        return;
+                    }
+                }
+                Ok(SonyCommand::Wake) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => thread::sleep(Duration::from_millis(250)),
+            }
+        }
     }
 
     fn writes_allowed(&self) -> bool {
@@ -575,13 +626,61 @@ impl SonyWorker {
                     let _ = reply.send(Err(code.to_owned()));
                 }
                 // Disconnected: readOnly is already true.
-                Ok(SonyCommand::SettingsChanged | SonyCommand::Wake)
-                | Err(RecvTimeoutError::Timeout) => {}
+                Ok(SonyCommand::SettingsChanged) => {
+                    // Switched off: end the pause so the card goes at once.
+                    if !self.module_on() {
+                        return true;
+                    }
+                }
+                Ok(SonyCommand::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 // The manager is gone: nothing to wake us, keep the pace.
                 Err(RecvTimeoutError::Disconnected) => thread::sleep(slice),
             }
         }
     }
+}
+
+/// [`connect_if_present`] behind the module switch: with the module off `find` is never
+/// called, so nothing is listed.
+fn connect_when_enabled<T>(
+    enabled: bool,
+    find: impl FnOnce() -> Result<Option<PairedDevice>, RfcommError>,
+    open: impl FnOnce(&PairedDevice) -> Result<T, ConnectError>,
+) -> Result<T, ConnectError> {
+    if !enabled {
+        return Err(ConnectError::Disabled);
+    }
+    connect_if_present(find, open)
+}
+
+/// Looks for the headset and opens a session only when the paired device reports
+/// connected; otherwise nothing is sent and [`ConnectError::NotConnected`] comes back.
+fn connect_if_present<T>(
+    find: impl FnOnce() -> Result<Option<PairedDevice>, RfcommError>,
+    open: impl FnOnce(&PairedDevice) -> Result<T, ConnectError>,
+) -> Result<T, ConnectError> {
+    let device = match find() {
+        Ok(found) => found,
+        Err(RfcommError::Unsupported) => return Err(ConnectError::Unsupported),
+        Err(e) => return Err(ConnectError::Failed(e.to_string())),
+    };
+    match device {
+        None => Err(ConnectError::NotConnected("no paired WF-C710N".to_owned())),
+        Some(d) if !d.connected => Err(ConnectError::NotConnected(
+            "the paired WF-C710N is not connected".to_owned(),
+        )),
+        Some(d) => open(&d),
+    }
+}
+
+/// Opens the RFCOMM link and reads the snapshot.
+fn open_session(device: &PairedDevice) -> Result<(Session<RfcommLink>, Snapshot), ConnectError> {
+    let mut session = open(device).map_err(|e| match e {
+        SessionError::Transport(RfcommError::Unsupported) => ConnectError::Unsupported,
+        other => ConnectError::Failed(other.to_string()),
+    })?;
+    let snapshot = read_snapshot(&mut session).map_err(|e| ConnectError::Failed(e.to_string()))?;
+    Ok((session, snapshot))
 }
 
 fn answer_all(replies: Vec<Sender<Option<DeviceDetail>>>, detail: Option<DeviceDetail>) {
@@ -643,6 +742,7 @@ fn apply_write(
 mod tests {
     use super::*;
     use crate::device_manager::WRITE_DEADLINE_MARGIN;
+    use myhub_rfcomm::BtAddress;
 
     fn multipoint(confirm: bool) -> SonyWrite {
         SonyWrite::toggle(ToggleArg::Multipoint, false, confirm)
@@ -671,6 +771,61 @@ mod tests {
             Err("outOfRange".to_owned())
         );
         assert_eq!(SonyWrite::eq_bands(&[10, -1]), Err("outOfRange".to_owned()));
+    }
+
+    #[test]
+    fn no_connect_is_attempted_while_the_paired_device_is_not_connected() {
+        let mut opened = 0;
+        let device = |connected| PairedDevice::new("WF-C710N".into(), BtAddress::new(7), connected);
+        for found in [None, Some(device(false))] {
+            let r = connect_if_present(
+                || Ok(found),
+                |_| {
+                    opened += 1;
+                    Ok(())
+                },
+            );
+            assert!(matches!(r, Err(ConnectError::NotConnected(_))));
+        }
+        assert_eq!(opened, 0);
+    }
+
+    #[test]
+    fn a_switched_off_module_lists_and_opens_nothing() {
+        let calls = std::cell::Cell::new(0);
+        let r = connect_when_enabled(
+            false,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(None)
+            },
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(r, Err(ConnectError::Disabled)));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn a_connect_is_attempted_once_the_paired_device_reports_connected() {
+        let mut opened = 0;
+        let r = connect_if_present(
+            || {
+                Ok(Some(PairedDevice::new(
+                    "WF-C710N".into(),
+                    BtAddress::new(7),
+                    true,
+                )))
+            },
+            |_| {
+                opened += 1;
+                Err::<(), _>(ConnectError::Failed("refused".into()))
+            },
+        );
+        assert!(matches!(r, Err(ConnectError::Failed(_))));
+        assert_eq!(opened, 1);
     }
 
     #[test]

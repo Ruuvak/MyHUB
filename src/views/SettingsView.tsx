@@ -82,6 +82,20 @@ export function SettingsView() {
             </div>
           </Panel>
 
+          <Panel title={t("settings.modules")}>
+            <div className="divide-y divide-border px-4">
+              {(["logitech", "sony", "keychron"] as const).map((key) => (
+                <SwitchRow
+                  key={key}
+                  label={t(`settings.modules.${key}`)}
+                  checked={settings.modules[key]}
+                  onChange={(on) => update({ modules: { ...settings.modules, [key]: on } })}
+                />
+              ))}
+            </div>
+            <p className="px-4 pb-3 text-sm text-text-muted">{t("settings.modules.hint")}</p>
+          </Panel>
+
           <Panel title={t("settings.device")}>
             <div className="divide-y divide-border px-4">
               <SwitchRow

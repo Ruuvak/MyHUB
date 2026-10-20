@@ -37,11 +37,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keychron_k2he::{
-    DEVICE_ID, Incoming, KeyWord, KeyboardCache, LightChange, LightState, LinkSnapshot, RawLink,
-    SaveMode, Session, SessionError, Snapshot, TravelMode, TravelSettings, cache_of, cache_path,
-    list_interfaces, list_receiver_interfaces, read_global_word, read_light_state, read_link,
-    read_link_state, read_profiles_info, read_snapshot, refresh_state, select_profile,
-    set_lighting_with, set_travel_global_with, to_detail, to_receiver_detail,
+    DEVICE_ID, Incoming, KeyWord, KeyboardCache, LightChange, LightState, LinkSnapshot, Presence,
+    RawLink, SaveMode, Session, SessionError, Snapshot, TravelMode, TravelSettings, cache_of,
+    cache_path, presence, read_global_word, read_light_state, read_link, read_link_state,
+    read_profiles_info, read_snapshot, refresh_state, select_profile, set_lighting_with,
+    set_travel_global_with, to_detail, to_receiver_detail,
 };
 
 use myhub_core::{Connection, DeviceDetail};
@@ -49,11 +49,36 @@ use serde::Deserialize;
 use tauri::Manager;
 
 use crate::device_manager::{FlashFlag, ManagerState, Slot, clock_ms, lock, publish_slot};
+use crate::hotplug;
 use crate::settings::SettingsState;
 
-/// Pause between enumerations while the keyboard is absent, and between the checks for
-/// an unplug while it is connected.
-const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+// A full HID enumeration is expensive on Windows (SetupDi plus a CreateFile on every HID
+// device, audio devices' HID interfaces included). Run every 2 s it is the likely cause
+// [INF] of the system audio glitches seen while MyHUB was open [OBS]. So: no enumeration
+// while a USB session is open (an unplug shows up as a read error), and only the
+// intervals below otherwise.
+
+/// Pause between enumerations while neither the keyboard nor the receiver is found (and
+/// after a receiver that could not be used).
+const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+/// Pause after a session that was lost, once, before the next look.
+const RECONNECT_PAUSE: Duration = Duration::from_secs(2);
+/// A USB session at least this long counts as a success for the back off.
+const HEALTHY_SESSION: Duration = Duration::from_secs(30);
+
+/// Pause after the n-th consecutive connect failure or quick loss: 2 s, 5 s, then the idle
+/// scan interval (a slow fallback when hotplug is active).
+fn connect_backoff(failures: u32) -> Duration {
+    match failures {
+        0..=1 => RECONNECT_PAUSE,
+        2 => Duration::from_secs(5),
+        _ => hotplug::scan_interval(IDLE_SCAN_INTERVAL),
+    }
+}
+
+/// Gap between the checks for the cable (and the receiver) while a receiver session is
+/// open. A Refresh command from the UI checks at once.
+const CABLE_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 /// Pause after a connect that failed because another program was talking.
 const FOREIGN_CONNECT_WAIT: Duration = Duration::from_secs(10);
 /// One listen of the serving loop; also the latency of a refresh command and of
@@ -61,8 +86,10 @@ const FOREIGN_CONNECT_WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(200);
 /// No foreign report for this long before the worker sends anything again.
 pub const FOREIGN_QUIET: Duration = Duration::from_secs(10);
-/// Gap between two B2 reads over the receiver.
-pub const LINK_POLL: Duration = Duration::from_secs(5);
+/// Gap between two B2 reads over the receiver. The receiver sends no link-change report
+/// [OBS, `read_link_state`], so B2 is the only way to see the keyboard come and go; a
+/// handful of seconds of latency in a status line is not worth a request every 5 s.
+pub const LINK_POLL: Duration = Duration::from_secs(15);
 
 /// What the keyboard worker accepts.
 pub enum KeychronCommand {
@@ -755,14 +782,41 @@ impl<L: RawLink> Link<L> {
     }
 }
 
-/// True while the keyboard's raw HID interface is listed. Only enumerates.
-fn present() -> bool {
-    list_interfaces().is_ok_and(|found| found.iter().any(|i| i.matched))
+/// What is listed right now, from one enumeration. An enumeration failure counts as
+/// nothing found.
+fn scan() -> Presence {
+    presence().unwrap_or(Presence {
+        keyboard: false,
+        receiver: false,
+    })
 }
 
-/// True while the receiver's raw HID interface is listed. Only enumerates.
-fn receiver_present() -> bool {
-    list_receiver_interfaces().is_ok_and(|found| found.iter().any(|i| i.matched))
+/// [`scan`] behind the module switch: `None` without calling `enumerate` when it is off.
+fn scan_if_enabled(enabled: bool, enumerate: impl FnOnce() -> Presence) -> Option<Presence> {
+    enabled.then(enumerate)
+}
+
+/// When the receiver loop checks for the cable next.
+struct CableCheck {
+    next: Instant,
+}
+
+impl CableCheck {
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now + hotplug::scan_interval(CABLE_CHECK_INTERVAL),
+        }
+    }
+
+    /// True when a check is due (or `forced`, a user-driven refresh); re-arms itself.
+    fn due(&mut self, now: Instant, forced: bool) -> bool {
+        if forced || now >= self.next {
+            self.next = now + hotplug::scan_interval(CABLE_CHECK_INTERVAL);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Why no session could be opened.
@@ -778,6 +832,8 @@ enum ConnectError {
 enum Outcome {
     Stopped,
     Lost(String),
+    /// The module was switched off: the session is closed.
+    Disabled,
 }
 
 /// How a receiver session ended.
@@ -838,10 +894,33 @@ impl KeychronWorker {
             .config_dir
             .as_deref()
             .and_then(|dir| KeyboardCache::load(&cache_path(dir)));
+        // Consecutive connect failures or short sessions; drives the back off.
+        let mut failures: u32 = 0;
         while !self.stopping() {
-            let mut pause = SCAN_INTERVAL;
+            let mut pause = RECONNECT_PAUSE;
+            // One enumeration per cycle answers both questions; none with the module off.
+            let Some(found) = scan_if_enabled(self.module_on(), scan) else {
+                last_error = None;
+                if lock(&self.state).find(DEVICE_ID).is_some() {
+                    publish_slot(
+                        &self.app,
+                        &self.state,
+                        self.stopping(),
+                        Slot::Keychron,
+                        None,
+                        true,
+                    );
+                }
+                self.wait_while_off();
+                continue;
+            };
+            if !found.keyboard && !found.receiver {
+                last_error = None;
+                self.wait(hotplug::scan_interval(IDLE_SCAN_INTERVAL));
+                continue;
+            }
             // USB has priority: the receiver is only looked at while the cable is out.
-            if !present() && receiver_present() {
+            if !found.keyboard {
                 match self.serve_receiver(cache.as_ref(), &mut last_error) {
                     ReceiverEnd::Stopped => return,
                     ReceiverEnd::Retry(wait) => pause = wait,
@@ -856,13 +935,22 @@ impl KeychronWorker {
                     let mut stamp = clock_ms();
                     self.store_cache(&mut cache, &keyboard.snapshot);
                     self.publish(self.stamped(&keyboard, true, stamp), true);
+                    let started = Instant::now();
                     let outcome = self.serve(&mut keyboard, &mut stamp, &mut cache);
                     // Closes the interface.
                     match outcome {
                         Outcome::Stopped => return,
+                        Outcome::Disabled => pause = Duration::ZERO,
                         Outcome::Lost(reason) => {
                             eprintln!("myhub: keyboard link lost: {reason}");
                             self.publish(self.stamped(&keyboard, false, stamp), false);
+                            // A session that lasted is a success; a quick loss backs off.
+                            failures = if started.elapsed() >= HEALTHY_SESSION {
+                                0
+                            } else {
+                                failures + 1
+                            };
+                            pause = connect_backoff(failures);
                         }
                     }
                 }
@@ -879,9 +967,14 @@ impl KeychronWorker {
                         eprintln!("myhub: keyboard not connected: {message}");
                         last_error = Some(message);
                     }
+                    failures += 1;
+                    pause = connect_backoff(failures);
                 }
             }
-            self.wait(pause);
+            // A hotplug wake means something changed: start the back off over.
+            if self.wait(pause) {
+                failures = 0;
+            }
         }
     }
 
@@ -899,9 +992,7 @@ impl KeychronWorker {
 
     /// Looks for the interface, opens it and reads the snapshot.
     fn connect(&self) -> Result<Keyboard<keychron_k2he::HidapiLink>, ConnectError> {
-        if !present() {
-            return Err(ConnectError::Absent);
-        }
+        // `Session::open` enumerates itself; no separate presence check.
         let mut session = Session::open().map_err(|e| match e {
             SessionError::NotFound => ConnectError::Absent,
             other => ConnectError::Failed(other.to_string()),
@@ -922,7 +1013,8 @@ impl KeychronWorker {
         stamp: &mut u64,
         cache: &mut Option<KeyboardCache>,
     ) -> Outcome {
-        let mut next_scan = Instant::now() + SCAN_INTERVAL;
+        // No periodic enumeration here: `keyboard.step` listens every POLL, and a removed
+        // device makes that read fail, which ends the session as `Outcome::Lost`.
         while !self.stopping() {
             let mut replies = Vec::new();
             let mut dirty = false;
@@ -942,6 +1034,15 @@ impl KeychronWorker {
                     KeychronCommand::SettingsChanged => dirty = true,
                     KeychronCommand::Wake => {}
                 }
+            }
+            // Switched off since the last pass: queued writes are refused (a write that
+            // already started has finished; they run one at a time in this thread).
+            if !self.module_on() {
+                for write in selects {
+                    let _ = write.reply.send(Err("disconnected".to_owned()));
+                }
+                answer_all(replies, None);
+                return Outcome::Disabled;
             }
             if let Err(reason) = self.run_writes(keyboard, stamp, cache, selects) {
                 answer_all(replies, Some(self.stamped(keyboard, false, *stamp)));
@@ -963,14 +1064,6 @@ impl KeychronWorker {
                     let detail = self.stamped(keyboard, false, *stamp);
                     answer_all(replies, Some(detail));
                     return Outcome::Lost(reason);
-                }
-            }
-            if now >= next_scan {
-                next_scan = now + SCAN_INTERVAL;
-                if !present() {
-                    let detail = self.stamped(keyboard, false, *stamp);
-                    answer_all(replies, Some(detail));
-                    return Outcome::Lost("the keyboard was unplugged".to_owned());
                 }
             }
             if dirty || !replies.is_empty() {
@@ -1036,7 +1129,9 @@ impl KeychronWorker {
     ) -> ReceiverEnd {
         let mut session = match Session::open_receiver() {
             Ok(session) => session,
-            Err(SessionError::ReceiverNotFound) => return ReceiverEnd::Retry(SCAN_INTERVAL),
+            Err(SessionError::ReceiverNotFound) => {
+                return ReceiverEnd::Retry(hotplug::scan_interval(IDLE_SCAN_INTERVAL));
+            }
             Err(other) => return self.receiver_failed(other.to_string(), last_error),
         };
         let first = match read_link(&mut session) {
@@ -1062,10 +1157,11 @@ impl KeychronWorker {
         if let Some(detail) = self.receiver_detail(&link, cache, stamp) {
             self.publish(detail, true);
         }
-        let mut next_scan = Instant::now() + SCAN_INTERVAL;
+        let mut cable = CableCheck::new(Instant::now());
         while !self.stopping() {
             let mut replies = Vec::new();
             let mut dirty = false;
+            let mut woken = false;
             while let Ok(command) = self.commands.try_recv() {
                 match command {
                     KeychronCommand::Refresh { reply } => replies.push(reply),
@@ -1074,8 +1170,13 @@ impl KeychronWorker {
                         let _ = reply.send(Err(code.to_owned()));
                     }
                     KeychronCommand::SettingsChanged => dirty = true,
-                    KeychronCommand::Wake => {}
+                    // A HID arrival (or shutdown): check for the cable now.
+                    KeychronCommand::Wake => woken = true,
                 }
+            }
+            if !self.module_on() {
+                answer_all(replies, None);
+                return ReceiverEnd::Retry(Duration::ZERO);
             }
             let now = Instant::now();
             match link.step(now, !replies.is_empty(), POLL) {
@@ -1089,21 +1190,21 @@ impl KeychronWorker {
                     eprintln!("myhub: keyboard receiver lost: {reason}");
                     stamp = clock_ms();
                     answer_all(replies, self.mark_gone(&link, cache, stamp));
-                    return ReceiverEnd::Retry(SCAN_INTERVAL);
+                    return ReceiverEnd::Retry(RECONNECT_PAUSE);
                 }
             }
-            if now >= next_scan {
-                next_scan = now + SCAN_INTERVAL;
-                if present() {
+            if cable.due(now, !replies.is_empty() || woken) {
+                let found = scan();
+                if found.keyboard {
                     // The cable is in: USB takes over, the caller opens it right away.
                     answer_all(replies, lock(&self.state).find(DEVICE_ID));
                     return ReceiverEnd::Retry(Duration::ZERO);
                 }
-                if !receiver_present() {
+                if !found.receiver {
                     eprintln!("myhub: keyboard receiver unplugged");
                     stamp = clock_ms();
                     answer_all(replies, self.mark_gone(&link, cache, stamp));
-                    return ReceiverEnd::Retry(SCAN_INTERVAL);
+                    return ReceiverEnd::Retry(RECONNECT_PAUSE);
                 }
             }
             if dirty || !replies.is_empty() {
@@ -1123,7 +1224,7 @@ impl KeychronWorker {
             *last_error = Some(message);
         }
         self.mark_disconnected();
-        ReceiverEnd::Retry(SCAN_INTERVAL)
+        ReceiverEnd::Retry(hotplug::scan_interval(IDLE_SCAN_INTERVAL))
     }
 
     /// The detail for the receiver state: connected when B2 says a K2 HE is linked,
@@ -1172,6 +1273,34 @@ impl KeychronWorker {
         }
     }
 
+    fn module_on(&self) -> bool {
+        self.app
+            .try_state::<SettingsState>()
+            .is_none_or(|s| s.modules().keychron)
+    }
+
+    /// Idle while the module is off: no enumeration. Ends when the switch is on again (a
+    /// settings change) or on shutdown; a hotplug wake does not end it.
+    fn wait_while_off(&self) {
+        while !self.stopping() {
+            match self.commands.recv_timeout(Duration::from_millis(250)) {
+                Ok(KeychronCommand::Refresh { reply }) => {
+                    let _ = reply.send(None);
+                }
+                Ok(KeychronCommand::Write { reply, .. }) => {
+                    let _ = reply.send(Err("disconnected".to_owned()));
+                }
+                Ok(KeychronCommand::SettingsChanged) => {
+                    if self.module_on() {
+                        return;
+                    }
+                }
+                Ok(KeychronCommand::Wake) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => thread::sleep(Duration::from_millis(250)),
+            }
+        }
+    }
+
     fn writes_allowed(&self) -> bool {
         self.app
             .try_state::<SettingsState>()
@@ -1194,31 +1323,60 @@ impl KeychronWorker {
         detail
     }
 
-    /// Sleeps up to `duration` in short slices. A refresh command is answered with the
-    /// cached detail (there is no session to read from) and does not end the sleep.
-    fn wait(&self, duration: Duration) {
-        let deadline = Instant::now() + duration;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.stopping() {
-                return;
-            }
-            let slice = left.min(Duration::from_millis(250));
-            match self.commands.recv_timeout(slice) {
-                Ok(KeychronCommand::Refresh { reply }) => {
+    /// Sleeps up to `duration`. A refresh command is answered with the cached detail
+    /// (there is no session to read from) and does not end the sleep; a wake (HID arrival,
+    /// shutdown) does.
+    fn wait(&self, duration: Duration) -> bool {
+        wait_for_wake(
+            &self.commands,
+            duration,
+            || self.stopping(),
+            |command| match command {
+                KeychronCommand::Refresh { reply } => {
                     let cached = lock(&self.state).find(DEVICE_ID);
                     let _ = reply.send(cached);
+                    false
                 }
-                Ok(KeychronCommand::Write { reply, .. }) => {
+                KeychronCommand::Write { reply, .. } => {
                     let code = no_usb_refusal(self.writes_allowed(), false);
                     let _ = reply.send(Err(code.to_owned()));
+                    false
                 }
-                // Disconnected: readOnly is already true.
-                Ok(KeychronCommand::SettingsChanged | KeychronCommand::Wake)
-                | Err(RecvTimeoutError::Timeout) => {}
-                // The manager is gone: nothing to wake us, keep the pace.
-                Err(RecvTimeoutError::Disconnected) => thread::sleep(slice),
+                // Switched off: end the pause so the card goes at once. Otherwise
+                // disconnected: readOnly is already true.
+                KeychronCommand::SettingsChanged => !self.module_on(),
+                KeychronCommand::Wake => false,
+            },
+        )
+    }
+}
+
+/// The idle pause: waits up to `duration` in short slices, hands every command except a
+/// wake to `on_command`, and returns early on a wake, on `stopping` or when the sender is
+/// gone for good (then it keeps the pace).
+fn wait_for_wake(
+    commands: &Receiver<KeychronCommand>,
+    duration: Duration,
+    stopping: impl Fn() -> bool,
+    mut on_command: impl FnMut(KeychronCommand) -> bool,
+) -> bool {
+    let deadline = Instant::now() + duration;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stopping() {
+            return false;
+        }
+        let slice = left.min(Duration::from_millis(250));
+        match commands.recv_timeout(slice) {
+            Ok(KeychronCommand::Wake) => return true,
+            Ok(command) => {
+                if on_command(command) {
+                    return false;
+                }
             }
+            Err(RecvTimeoutError::Timeout) => {}
+            // The manager is gone: nothing to wake us, keep the pace.
+            Err(RecvTimeoutError::Disconnected) => thread::sleep(slice),
         }
     }
 }
@@ -1271,6 +1429,68 @@ mod tests {
     use keychron_k2he::{LinkError, READ_BUF_LEN, REPORT_LEN};
     use keychron_proto::he::{HeInfo, ProfilesInfo};
     use keychron_proto::system::KcVersion;
+
+    #[test]
+    fn a_wake_ends_the_idle_pause_and_a_refresh_does_not() {
+        let (tx, rx) = mpsc::channel();
+        let (reply, answer) = mpsc::channel();
+        tx.send(KeychronCommand::Refresh { reply }).unwrap();
+        tx.send(KeychronCommand::Wake).unwrap();
+        let mut handled = 0;
+        let started = Instant::now();
+        wait_for_wake(
+            &rx,
+            Duration::from_secs(30),
+            || false,
+            |command| {
+                handled += 1;
+                if let KeychronCommand::Refresh { reply } = command {
+                    let _ = reply.send(None);
+                }
+                false
+            },
+        );
+        // The refresh was served first, then the wake cut the 30 s pause short.
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(handled, 1);
+        assert_eq!(answer.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn the_idle_pause_runs_out_without_a_wake_and_stops_on_shutdown() {
+        let (_tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        wait_for_wake(&rx, Duration::from_millis(300), || false, |_| false);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        let started = Instant::now();
+        wait_for_wake(&rx, Duration::from_secs(30), || true, |_| false);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_forced_cable_check_does_not_wait_for_the_slow_interval() {
+        let t0 = Instant::now();
+        let mut cable = CableCheck::new(t0);
+        // A wake (HID arrival) forces the check like a refresh does, and re-arms it.
+        assert!(cable.due(t0 + Duration::from_secs(1), true));
+        assert!(!cable.due(t0 + Duration::from_secs(2), false));
+    }
+
+    #[test]
+    fn cable_check_is_slow_and_a_refresh_forces_it() {
+        let t0 = Instant::now();
+        let mut cable = CableCheck::new(t0);
+        // The old 2 s cadence is gone.
+        assert!(!cable.due(t0 + Duration::from_secs(2), false));
+        assert!(!cable.due(t0 + CABLE_CHECK_INTERVAL - Duration::from_millis(1), false));
+        assert!(cable.due(t0 + CABLE_CHECK_INTERVAL, false));
+        // Re-armed from the check.
+        let t1 = t0 + CABLE_CHECK_INTERVAL;
+        assert!(!cable.due(t1 + Duration::from_secs(2), false));
+        // A refresh checks at once and re-arms too.
+        assert!(cable.due(t1 + Duration::from_secs(3), true));
+        assert!(!cable.due(t1 + Duration::from_secs(4), false));
+    }
 
     use super::*;
 
@@ -1573,13 +1793,13 @@ mod tests {
         assert!(rx.detail(None, true).keyboard.unwrap().other_configurator);
         // Neither a refresh nor the poll interval sends anything meanwhile.
         assert_eq!(rx.step(t0, true, Duration::ZERO), Ok(false));
-        let later = t0 + LINK_POLL + Duration::from_secs(1);
+        let later = t0 + FOREIGN_QUIET - Duration::from_secs(1);
         assert_eq!(rx.step(later, false, Duration::ZERO), Ok(false));
         assert_eq!(shared.borrow().written, 0);
         // After the quiet time the flag clears and B2 is due. The session own back-off runs
         // on the real clock (5 s from the foreign report above), so the read is refused
         // before a byte is written and a new quiet time starts: the attempt was made.
-        let quiet = t0 + FOREIGN_QUIET;
+        let quiet = t0 + LINK_POLL.max(FOREIGN_QUIET);
         assert_eq!(rx.step(quiet, false, Duration::ZERO), Ok(false));
         assert_eq!(rx.last_foreign, Some(quiet));
         assert_eq!(shared.borrow().written, 0);
@@ -1751,6 +1971,33 @@ mod tests {
         assert_eq!(second_rx.try_recv().unwrap().unwrap_err(), "disconnected");
         // A9 10, the failed A9 11, no re-read.
         assert_eq!(shared.borrow().written, 2);
+    }
+
+    #[test]
+    fn connect_failures_back_off_2s_5s_then_the_idle_interval() {
+        assert_eq!(connect_backoff(1), Duration::from_secs(2));
+        assert_eq!(connect_backoff(2), Duration::from_secs(5));
+        assert_eq!(
+            connect_backoff(3),
+            hotplug::scan_interval(IDLE_SCAN_INTERVAL)
+        );
+        assert_eq!(connect_backoff(40), connect_backoff(3));
+    }
+
+    #[test]
+    fn a_switched_off_module_enumerates_nothing() {
+        let calls = std::cell::Cell::new(0);
+        let enumerate = || {
+            calls.set(calls.get() + 1);
+            Presence {
+                keyboard: true,
+                receiver: true,
+            }
+        };
+        assert!(scan_if_enabled(false, enumerate).is_none());
+        assert_eq!(calls.get(), 0);
+        assert!(scan_if_enabled(true, enumerate).is_some());
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

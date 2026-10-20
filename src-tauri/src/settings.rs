@@ -31,6 +31,26 @@ pub enum Language {
     En,
 }
 
+/// Per device family switch. A family that is off touches no hardware: no
+/// enumeration, no Bluetooth, no reads. All on by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Modules {
+    pub logitech: bool,
+    pub sony: bool,
+    pub keychron: bool,
+}
+
+impl Default for Modules {
+    fn default() -> Self {
+        Self {
+            logitech: true,
+            sony: true,
+            keychron: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -46,6 +66,8 @@ pub struct Settings {
     pub restore_last_mode: bool,
     /// Start MyHUB at login (registry Run key on Windows, XDG autostart on Linux). On by default.
     pub launch_at_login: bool,
+    /// Which device families MyHUB talks to.
+    pub modules: Modules,
 }
 
 impl Default for Settings {
@@ -58,6 +80,7 @@ impl Default for Settings {
             allow_device_writes: false,
             restore_last_mode: true,
             launch_at_login: true,
+            modules: Modules::default(),
         }
     }
 }
@@ -96,7 +119,23 @@ impl Settings {
             // The old `restoreOnConnect` is ignored.
             restore_last_mode: field(&map, "restoreLastMode", defaults.restore_last_mode),
             launch_at_login: field(&map, "launchAtLogin", defaults.launch_at_login),
+            modules: modules_from(map.get("modules")),
         })
+    }
+}
+
+/// Reads `modules` field by field; anything missing or not a bool stays on.
+fn modules_from(value: Option<&serde_json::Value>) -> Modules {
+    let flag = |key: &str| {
+        value
+            .and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    };
+    Modules {
+        logitech: flag("logitech"),
+        sony: flag("sony"),
+        keychron: flag("keychron"),
     }
 }
 
@@ -238,6 +277,11 @@ impl SettingsState {
         self.lock().clone()
     }
 
+    /// The module switches only (cheap; workers ask at every loop step).
+    pub fn modules(&self) -> Modules {
+        self.lock().modules
+    }
+
     /// Validates, saves to disk, then stores in memory. On error nothing changes.
     pub fn set(&self, settings: Settings) -> Result<Settings, String> {
         settings.validate()?;
@@ -351,6 +395,11 @@ mod tests {
             allow_device_writes: true,
             restore_last_mode: false,
             launch_at_login: false,
+            modules: Modules {
+                logitech: false,
+                sony: true,
+                keychron: false,
+            },
         };
         save_to(&dir.file(), &wanted).unwrap();
         assert!(!dir.0.join(TEMP_FILE).exists());
@@ -373,7 +422,7 @@ mod tests {
         let json = serde_json::to_string(&Settings::default()).unwrap();
         assert_eq!(
             json,
-            r#"{"theme":"system","language":"auto","closeToTray":true,"startMinimized":false,"allowDeviceWrites":false,"restoreLastMode":true,"launchAtLogin":true}"#
+            r#"{"theme":"system","language":"auto","closeToTray":true,"startMinimized":false,"allowDeviceWrites":false,"restoreLastMode":true,"launchAtLogin":true,"modules":{"logitech":true,"sony":true,"keychron":true}}"#
         );
     }
 
@@ -432,6 +481,26 @@ mod tests {
         let strict: Settings = serde_json::from_str(r#"{"closeToTray":false}"#).unwrap();
         assert!(strict.launch_at_login);
         assert!(!strict.close_to_tray);
+    }
+
+    #[test]
+    fn modules_default_on_and_old_files_stay_lenient() {
+        let d = Settings::default().modules;
+        assert!(d.logitech && d.sony && d.keychron);
+        let old = Settings::from_json_lenient(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(old.modules, Modules::default());
+        let partial =
+            Settings::from_json_lenient(r#"{"modules":{"sony":false,"keychron":"x"}}"#).unwrap();
+        assert_eq!(
+            partial.modules,
+            Modules {
+                logitech: true,
+                sony: false,
+                keychron: true
+            }
+        );
+        let strict: Settings = serde_json::from_str(r#"{"modules":{"logitech":false}}"#).unwrap();
+        assert!(!strict.modules.logitech && strict.modules.sony && strict.modules.keychron);
     }
 
     #[test]
