@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Sidebar, type View } from "./components/Sidebar";
+import { AccessBanner } from "./components/AccessBanner";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { takePendingTab } from "./lib/deepLink";
 import { onSelectDevice } from "./lib/ipc";
@@ -65,6 +66,7 @@ export function App() {
         <UpdateBanner />
         <main className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-8">
           <div key={view} className="animate-page h-full">
+            {view === "devices" ? <AccessBanner /> : null}
             {view === "devices" ? (
               <DevicesView
                 devices={devices}

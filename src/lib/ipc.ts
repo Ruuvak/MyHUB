@@ -2,6 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
+  AccessIssue,
   AppInfo,
   DeviceDetail,
   DevicePrefs,
@@ -362,6 +363,12 @@ export function hideFlyout(): Promise<void> {
   return invoke<void>("hide_flyout");
 }
 
+/** Opens the folder with myhub.log in the OS file manager. Rejects with "noLogDir" or "openFailed". A no-op outside Tauri. */
+export function openLogsFolder(): Promise<void> {
+  if (!isTauri()) return Promise.resolve();
+  return invoke<void>("open_logs_folder");
+}
+
 /** Subscribes to a backend event. Resolves to an unsubscribe function; a no-op outside Tauri. */
 async function subscribe<T>(event: string, cb: (payload: T) => void): Promise<() => void> {
   if (!isTauri()) return () => {};
@@ -514,4 +521,25 @@ export function onUpdateProgress(cb: (progress: UpdateProgress) => void): Promis
 /** Sent to the main window by the tray item "Check for updates". */
 export function onCheckUpdates(cb: () => void): Promise<() => void> {
   return subscribe<null>("check-updates", () => cb());
+}
+
+/** Dev preview only: ?access=1 shows the Linux access banner. */
+function previewAccess(): boolean {
+  return import.meta.env.DEV && new URLSearchParams(window.location.search).has("access");
+}
+
+/** Modules whose device cannot be opened for lack of permission; always empty on Windows. */
+export function getAccessIssues(): Promise<AccessIssue[]> {
+  if (!isTauri()) return Promise.resolve(previewAccess() ? [{ module: "logitech" }] : []);
+  return invoke<AccessIssue[]>("get_access_issues");
+}
+
+export function onAccessIssuesChanged(cb: (issues: AccessIssue[]) => void): Promise<() => void> {
+  return subscribe<AccessIssue[]>("access-issues-changed", cb);
+}
+
+/** Writes the bundled udev rule to the Downloads folder; resolves to the file path. */
+export function saveUdevRule(): Promise<string> {
+  if (!isTauri()) return Promise.resolve("~/Downloads/70-myhub.rules");
+  return invoke<string>("save_udev_rule");
 }

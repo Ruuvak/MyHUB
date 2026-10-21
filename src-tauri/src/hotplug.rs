@@ -2,8 +2,7 @@
 //! removal (CM_Register_Notification, CfgMgr32) wakes the Logitech and Keychron workers,
 //! so a plugged-in receiver or cable is found at once and the idle scans can be a slow
 //! fallback ([`HOTPLUG_FALLBACK`]). The callback does no I/O: it only queues a unit on a
-//! channel; a small thread coalesces a burst into one wake per [`DEBOUNCE`]. On other
-//! platforms hotplug is a stub: nothing is registered and the workers keep their short
+//! channel; a small thread coalesces a burst into one wake per [`DEBOUNCE`]. On Linux a udev monitor on hidraw nodes does the same. On other platforms hotplug is a stub: nothing is registered and the workers keep their short
 //! idle intervals.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,7 +151,7 @@ mod platform {
                 CM_Register_Notification(&filter, context.cast(), Some(on_event), &mut handle)
             };
             if result != CR_SUCCESS {
-                eprintln!("myhub: hotplug notification unavailable (CONFIGRET {result})");
+                log_line!("myhub: hotplug notification unavailable (CONFIGRET {result})");
                 // SAFETY: never handed to a callback.
                 drop(unsafe { Box::from_raw(context) });
                 return None;
@@ -167,7 +166,7 @@ mod platform {
             let thread = match spawned {
                 Ok(thread) => thread,
                 Err(e) => {
-                    eprintln!("myhub: cannot start the hotplug thread: {e}");
+                    log_line!("myhub: cannot start the hotplug thread: {e}");
                     // SAFETY: handle came from the successful registration above.
                     unsafe { CM_Unregister_Notification(handle) };
                     // SAFETY: no callback runs after the unregister returned.
@@ -230,7 +229,135 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::os::fd::AsRawFd;
+    use std::thread::{self, JoinHandle};
+    use std::time::Instant;
+
+    use super::{ACTIVE, Coalescer, DEBOUNCE, Ordering};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, mpsc};
+
+    /// How long one poll waits, so the thread notices the stop flag.
+    const POLL_MS: i32 = 500;
+
+    /// A udev monitor on hidraw nodes, read on a helper thread. Dropping it stops and joins
+    /// the thread.
+    pub struct Hotplug {
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Hotplug {
+        /// Listens for hidraw arrivals and removals; `wake` is called from the helper
+        /// thread, at most once per debounce window. `None` (logged) when the monitor or
+        /// the thread cannot start: the workers then keep their short idle intervals.
+        pub fn start(wake: impl Fn() + Send + 'static) -> Option<Self> {
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&stop);
+            let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+            // Set before the thread runs, so its exit (ClearActive) always comes after.
+            ACTIVE.store(true, Ordering::SeqCst);
+            let spawned = thread::Builder::new()
+                .name("hotplug".into())
+                .spawn(move || {
+                    // However the thread ends, workers fall back to the short intervals.
+                    let _clear = ClearActive;
+                    // Built here, so the socket never crosses threads.
+                    let socket = match udev::MonitorBuilder::new()
+                        .and_then(|builder| builder.match_subsystem("hidraw"))
+                        .and_then(|builder| builder.listen())
+                    {
+                        Ok(socket) => socket,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e.to_string()));
+                            return;
+                        }
+                    };
+                    let _ = ready_tx.send(Ok(()));
+                    watch(&socket, &flag, &wake);
+                });
+            let thread = match spawned {
+                Ok(thread) => thread,
+                Err(e) => {
+                    ACTIVE.store(false, Ordering::SeqCst);
+                    log_line!("myhub: cannot start the hotplug thread: {e}");
+                    return None;
+                }
+            };
+            match ready_rx.recv() {
+                Ok(Ok(())) => Some(Self {
+                    stop,
+                    thread: Some(thread),
+                }),
+                Ok(Err(e)) => {
+                    log_line!("myhub: udev hotplug unavailable: {e}");
+                    let _ = thread.join();
+                    None
+                }
+                Err(_) => {
+                    let _ = thread.join();
+                    None
+                }
+            }
+        }
+    }
+
+    struct ClearActive;
+
+    impl Drop for ClearActive {
+        fn drop(&mut self) {
+            ACTIVE.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Polls the monitor socket; events feed the coalescer and one wake fires when the
+    /// debounce window ends.
+    fn watch(socket: &udev::MonitorSocket, stop: &AtomicBool, wake: &impl Fn()) {
+        let mut pending = Coalescer::new(DEBOUNCE);
+        while !stop.load(Ordering::SeqCst) {
+            let mut fds = [libc::pollfd {
+                fd: socket.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            // SAFETY: one valid pollfd for the call; the socket outlives it.
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, POLL_MS) };
+            if ready > 0 {
+                let bad = fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL);
+                if bad != 0 {
+                    log_line!("myhub: udev socket failed, hotplug stops");
+                    return;
+                }
+                // Drain the socket so the next poll blocks again.
+                if socket.iter().count() > 0 {
+                    pending.event(Instant::now());
+                }
+            } else if ready < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                log_line!("myhub: udev poll failed, hotplug stops");
+                return;
+            }
+            if pending.take_due(Instant::now()) {
+                wake();
+            }
+        }
+    }
+
+    impl Drop for Hotplug {
+        fn drop(&mut self) {
+            ACTIVE.store(false, Ordering::SeqCst);
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
     /// Stub: no system notification on this platform yet.
     pub struct Hotplug;

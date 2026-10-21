@@ -35,3 +35,9 @@ keychron-proto = { workspace = true }
 # Hotplug notification (src/hotplug.rs); same version as crates/rfcomm, already in Cargo.lock.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation"] }
+
+# Linux hotplug (src/hotplug.rs): udev monitor on hidraw, polled with libc::poll. Versions
+# match what hidapi linux-native and crates/rfcomm already use (Cargo.lock).
+[target.'cfg(target_os = "linux")'.dependencies]
+udev = "=0.9.3"
+libc = "0.2"

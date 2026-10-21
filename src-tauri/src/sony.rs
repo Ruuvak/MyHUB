@@ -269,7 +269,7 @@ impl SonyWorker {
     pub fn run(mut self) {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| self.run_loop()));
         if outcome.is_err() {
-            eprintln!("myhub: the headset worker panicked");
+            log_line!("myhub: the headset worker panicked");
             // Nobody serves the headset any more: show it as disconnected.
             let cached = lock(&self.state).find(sony_wf_c710n::DEVICE_ID);
             if let Some(mut detail) = cached {
@@ -305,7 +305,7 @@ impl SonyWorker {
             match connect_when_enabled(self.module_on(), || finder.find(), open_session) {
                 Ok((mut session, mut snapshot)) => {
                     last_error = None;
-                    eprintln!("myhub: headset connected");
+                    log_line!("myhub: headset connected");
                     let mut stamp = clock_ms();
                     self.publish(self.stamped(&snapshot, true, stamp), true);
                     let outcome = self.serve(&mut session, &mut snapshot, &mut stamp);
@@ -314,12 +314,12 @@ impl SonyWorker {
                     match outcome {
                         Outcome::Stopped => return,
                         Outcome::Disabled => {
-                            eprintln!("myhub: headset module off");
+                            log_line!("myhub: headset module off");
                             attempt = 0;
                             continue;
                         }
                         Outcome::Lost(reason) => {
-                            eprintln!("myhub: headset link lost: {reason}");
+                            log_line!("myhub: headset link lost: {reason}");
                             self.publish(self.stamped(&snapshot, false, stamp), false);
                             attempt = 0;
                         }
@@ -342,12 +342,12 @@ impl SonyWorker {
                     continue;
                 }
                 Err(ConnectError::Unsupported) => {
-                    eprintln!("myhub: headset support is not available on this platform");
+                    log_line!("myhub: headset support is not available on this platform");
                     return;
                 }
                 Err(ConnectError::NotConnected(message)) => {
                     if last_error.as_deref() != Some(message.as_str()) {
-                        eprintln!("myhub: headset not connected: {message}");
+                        log_line!("myhub: headset not connected: {message}");
                         last_error = Some(message);
                     }
                     // Local check only; the first attempt after it comes without delay.
@@ -356,7 +356,7 @@ impl SonyWorker {
                 }
                 Err(ConnectError::Failed(message)) => {
                     if last_error.as_deref() != Some(message.as_str()) {
-                        eprintln!("myhub: headset not connected: {message}");
+                        log_line!("myhub: headset not connected: {message}");
                         last_error = Some(message);
                     }
                 }
@@ -465,7 +465,7 @@ impl SonyWorker {
                         answer_all(replies, None);
                         return Outcome::Lost(e.to_string());
                     }
-                    eprintln!("myhub: headset read failed: {e}");
+                    log_line!("myhub: headset read failed: {e}");
                 }
             }
             if dirty {

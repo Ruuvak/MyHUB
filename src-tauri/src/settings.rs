@@ -158,7 +158,7 @@ pub fn load_from(path: &Path) -> Settings {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Settings::default(),
         Err(e) => {
-            eprintln!("myhub: cannot read {}: {e}; using defaults", path.display());
+            log_line!("myhub: cannot read {}: {e}; using defaults", path.display());
             return Settings::default();
         }
     };
@@ -167,11 +167,11 @@ pub fn load_from(path: &Path) -> Settings {
         Err(reason) => {
             let backup = path.with_file_name(BACKUP_FILE);
             match fs::rename(path, &backup) {
-                Ok(()) => eprintln!(
+                Ok(()) => log_line!(
                     "myhub: corrupt settings ({reason}); moved to {} and using defaults",
                     backup.display()
                 ),
-                Err(e) => eprintln!(
+                Err(e) => log_line!(
                     "myhub: corrupt settings ({reason}); backup to {} failed: {e}; using defaults",
                     backup.display()
                 ),
@@ -233,14 +233,14 @@ pub fn load_prefs(path: &Path) -> Option<DevicePrefs> {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
         Err(e) => {
-            eprintln!("myhub: cannot read {}: {e}; ignoring", path.display());
+            log_line!("myhub: cannot read {}: {e}; ignoring", path.display());
             return None;
         }
     };
     match serde_json::from_str(&text) {
         Ok(prefs) => Some(prefs),
         Err(e) => {
-            eprintln!(
+            log_line!(
                 "myhub: corrupt device prefs {}: {e}; ignoring",
                 path.display()
             );

@@ -58,7 +58,7 @@ fn place(window: &WebviewWindow) {
     // corner at the icon's top right and push the window off the screen.
     let placed = cfg!(windows) && window.move_window_constrained(Position::TrayCenter).is_ok();
     if !placed && let Err(e) = window.move_window(Position::BottomRight) {
-        eprintln!("myhub: cannot position the flyout: {e}");
+        log_line!("myhub: cannot position the flyout: {e}");
     }
 }
 
@@ -91,7 +91,7 @@ fn schedule_guard_check(app: &AppHandle) {
             let _ = app.run_on_main_thread(move || guard_expired(&on_main));
         });
     if let Err(e) = spawned {
-        eprintln!("myhub: cannot start the flyout guard timer: {e}");
+        log_line!("myhub: cannot start the flyout guard timer: {e}");
     }
 }
 

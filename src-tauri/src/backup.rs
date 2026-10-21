@@ -149,7 +149,7 @@ pub fn prune(dir: &Path, keep: usize) {
             continue;
         }
         if let Err(e) = fs::remove_file(&old) {
-            eprintln!("myhub: cannot delete old backup {}: {e}", old.display());
+            log_line!("myhub: cannot delete old backup {}: {e}", old.display());
         }
     }
 }

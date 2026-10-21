@@ -48,6 +48,10 @@ export const en = {
   "settings.modules.sony": "Sony WF-C710N headset",
   "settings.modules.keychron": "Keychron K2 HE keyboard",
   "settings.modules.hint": "A module that is off does not talk to its device.",
+  "settings.logs": "Logs",
+  "settings.logs.open": "Open logs folder",
+  "settings.logs.hint": "The myhub.log file helps to find the cause of a problem in an installed app.",
+  "settings.logs.error": "Could not open the logs folder.",
   "settings.allowWrites": "Allow changes on the device",
   "settings.allowWrites.hint": "Lets MyHUB save DPI levels and report rate to the active MyHUB profile in the mouse, and switch to app control. Each save makes a backup of the profile first.",
   "settings.restoreLastMode": "Restore the last mode after start",
@@ -66,6 +70,10 @@ export const en = {
   "update.latest": "You have the latest version",
   "update.error": "Could not update: {message}",
   "update.dismiss": "Close",
+  "access.message": "No access to the device. Install the MyHUB udev rule:",
+  "access.save": "Save rule file",
+  "access.saved": "Saved to {path}",
+  "access.saveError": "Could not save the file: {message}",
 
   "about.version": "Version",
   "about.description":

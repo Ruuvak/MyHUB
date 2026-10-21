@@ -2285,6 +2285,7 @@ dependencies = [
  "hidpp",
  "keychron-k2he",
  "keychron-proto",
+ "libc",
  "logitech-g502x",
  "myhub-core",
  "myhub-rfcomm",
@@ -2299,6 +2300,7 @@ dependencies = [
  "tauri-plugin-positioner",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "udev",
  "windows-sys 0.61.2",
 ]
 

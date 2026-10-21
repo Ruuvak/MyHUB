@@ -12,7 +12,7 @@ Wersja: SemVer, źródłem jest `package.json`. Workspace w głównym `Cargo.tom
 
 ## Wydanie
 
-1. `bun scripts/version.ts set X.Y.Z`
+1. `bun scripts/version.ts set X.Y.Z`; w `CHANGELOG.md` zmień nagłówek `## X.Y.Z (unreleased)` na `## X.Y.Z` (workflow bierze z niego opis wydania)
 2. `cargo check` (odświeża `Cargo.lock`)
 3. Testy: `cargo test --workspace`, `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `bun run typecheck`
 4. Commit zmian wersji.

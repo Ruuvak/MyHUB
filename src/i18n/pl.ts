@@ -50,6 +50,10 @@ export const pl: Messages = {
   "settings.modules.sony": "Słuchawki Sony WF-C710N",
   "settings.modules.keychron": "Klawiatura Keychron K2 HE",
   "settings.modules.hint": "Wyłączony moduł nie komunikuje się z urządzeniem.",
+  "settings.logs": "Logi",
+  "settings.logs.open": "Otwórz folder logów",
+  "settings.logs.hint": "Plik myhub.log pomaga znaleźć przyczynę problemu z zainstalowaną aplikacją.",
+  "settings.logs.error": "Nie udało się otworzyć folderu logów.",
   "settings.allowWrites": "Pozwól na zmiany w urządzeniu",
   "settings.allowWrites.hint": "Pozwala MyHUB zapisywać poziomy DPI i częstotliwość w aktywnym profilu MyHUB w myszy oraz przełączać sterowanie z aplikacji. Przed każdym zapisem powstaje kopia profilu.",
   "settings.restoreLastMode": "Przywracaj ostatni tryb po starcie",
@@ -68,6 +72,10 @@ export const pl: Messages = {
   "update.latest": "Masz najnowszą wersję",
   "update.error": "Nie udało się zaktualizować: {message}",
   "update.dismiss": "Zamknij",
+  "access.message": "Brak dostępu do urządzenia. Zainstaluj regułę udev MyHUB:",
+  "access.save": "Zapisz plik reguły",
+  "access.saved": "Zapisano w {path}",
+  "access.saveError": "Nie udało się zapisać pliku: {message}",
 
   "about.version": "Wersja",
   "about.description":

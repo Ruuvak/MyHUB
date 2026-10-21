@@ -1,3 +1,8 @@
+// First: its `log_line!` macro is used by every module below.
+#[macro_use]
+pub mod logfile;
+
+pub mod access;
 pub mod backup;
 pub mod device_manager;
 pub mod flyout;
@@ -40,7 +45,7 @@ fn sync_autostart(app: &AppHandle, launch_at_login: bool) {
     let enabled = match manager.is_enabled() {
         Ok(enabled) => enabled,
         Err(e) => {
-            eprintln!("myhub: cannot read autostart state: {e}");
+            log_line!("myhub: cannot read autostart state: {e}");
             return;
         }
     };
@@ -50,7 +55,7 @@ fn sync_autostart(app: &AppHandle, launch_at_login: bool) {
         _ => return,
     };
     if let Err(e) = result {
-        eprintln!("myhub: cannot update autostart: {e}");
+        log_line!("myhub: cannot update autostart: {e}");
     }
 }
 
@@ -89,7 +94,7 @@ fn set_settings(
         devices.settings_changed();
     }
     if let Err(e) = app.emit(SETTINGS_CHANGED_EVENT, &stored) {
-        eprintln!("myhub: cannot emit {SETTINGS_CHANGED_EVENT}: {e}");
+        log_line!("myhub: cannot emit {SETTINGS_CHANGED_EVENT}: {e}");
     }
     Ok(stored)
 }
@@ -396,7 +401,39 @@ fn open_main_window(app: AppHandle, device_id: Option<String>) {
     if let Some(id) = device_id
         && let Err(e) = app.emit_to(tray::MAIN_WINDOW, SELECT_DEVICE_EVENT, id)
     {
-        eprintln!("myhub: cannot emit {SELECT_DEVICE_EVENT}: {e}");
+        log_line!("myhub: cannot emit {SELECT_DEVICE_EVENT}: {e}");
+    }
+}
+
+/// Opens the folder that holds `myhub.log` in the OS file manager. Errors: `noLogDir`,
+/// `openFailed`.
+#[tauri::command]
+fn open_logs_folder(app: AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| "noLogDir".to_owned())?;
+    std::fs::create_dir_all(&dir).map_err(|_| "openFailed".to_owned())?;
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    // Spawn only: explorer exits with 1 even when it opened the folder.
+    match std::process::Command::new(program).arg(&dir).spawn() {
+        Ok(mut child) => {
+            // Reaped off thread, so xdg-open leaves no zombie.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            Ok(())
+        }
+        Err(e) => {
+            log_line!("myhub: cannot open the logs folder: {e}");
+            Err("openFailed".to_owned())
+        }
     }
 }
 
@@ -419,19 +456,26 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         .setup(|app| {
+            if let Ok(dir) = app.path().app_log_dir()
+                && let Err(e) = logfile::init(&dir)
+            {
+                log_line!("myhub: cannot open the log file in {}: {e}", dir.display());
+            }
+            log_line!("myhub: starting, version {}", env!("CARGO_PKG_VERSION"));
             let config_dir = app.path().app_config_dir()?;
             let state = SettingsState::load(config_dir.join(settings::SETTINGS_FILE));
             let current = state.get();
             app.manage(state);
             app.manage(flyout::FlyoutState::default());
             app.manage(updater::PendingUpdate::default());
+            app.manage(access::AccessIssues::default());
             sync_autostart(app.handle(), current.launch_at_login);
             let autostarted = std::env::args().any(|a| a == AUTOSTART_ARG);
 
             let tray_ok = match tray::init(app, &current) {
                 Ok(()) => true,
                 Err(e) => {
-                    eprintln!("myhub: tray icon unavailable: {e}");
+                    log_line!("myhub: tray icon unavailable: {e}");
                     false
                 }
             };
@@ -505,6 +549,9 @@ pub fn run() {
             set_keyboard_lighting,
             open_main_window,
             hide_flyout,
+            open_logs_folder,
+            access::get_access_issues,
+            access::save_udev_rule,
             updater::check_for_update,
             updater::install_update
         ])

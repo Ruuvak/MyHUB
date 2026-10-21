@@ -48,6 +48,7 @@ use myhub_core::{Connection, DeviceDetail};
 use serde::Deserialize;
 use tauri::Manager;
 
+use crate::access;
 use crate::device_manager::{FlashFlag, ManagerState, Slot, clock_ms, lock, publish_slot};
 use crate::hotplug;
 use crate::settings::SettingsState;
@@ -373,7 +374,7 @@ impl<L: RawLink> Keyboard<L> {
             | SessionError::BadReport(_) => Ok(self.mark_foreign(now)),
             SessionError::Link(_) => Err(error.to_string()),
             other => {
-                eprintln!("myhub: keyboard read failed: {other}");
+                log_line!("myhub: keyboard read failed: {other}");
                 // A failed re-read after the quiet period: wait another one.
                 if self.last_foreign.is_some() {
                     self.last_foreign = Some(now);
@@ -738,7 +739,7 @@ impl<L: RawLink> Link<L> {
             SessionError::Link(_) => Err(error.to_string()),
             other => {
                 if !self.read_failing {
-                    eprintln!("myhub: keyboard link read failed: {other}");
+                    log_line!("myhub: keyboard link read failed: {other}");
                     self.read_failing = true;
                 }
                 if self.last_foreign.is_some() {
@@ -858,7 +859,7 @@ impl KeychronWorker {
     pub fn run(mut self) {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| self.run_loop()));
         if outcome.is_err() {
-            eprintln!("myhub: the keyboard worker panicked");
+            log_line!("myhub: the keyboard worker panicked");
             // Nobody serves the keyboard any more: show it as disconnected.
             let cached = lock(&self.state).find(DEVICE_ID);
             if let Some(mut detail) = cached {
@@ -901,6 +902,7 @@ impl KeychronWorker {
             // One enumeration per cycle answers both questions; none with the module off.
             let Some(found) = scan_if_enabled(self.module_on(), scan) else {
                 last_error = None;
+                access::report_open(&self.app, "keychron", None);
                 if lock(&self.state).find(DEVICE_ID).is_some() {
                     publish_slot(
                         &self.app,
@@ -916,6 +918,7 @@ impl KeychronWorker {
             };
             if !found.keyboard && !found.receiver {
                 last_error = None;
+                access::report_open(&self.app, "keychron", None);
                 self.wait(hotplug::scan_interval(IDLE_SCAN_INTERVAL));
                 continue;
             }
@@ -931,7 +934,8 @@ impl KeychronWorker {
             match self.connect() {
                 Ok(mut keyboard) => {
                     last_error = None;
-                    eprintln!("myhub: keyboard connected");
+                    access::report_open(&self.app, "keychron", None);
+                    log_line!("myhub: keyboard connected");
                     let mut stamp = clock_ms();
                     self.store_cache(&mut cache, &keyboard.snapshot);
                     self.publish(self.stamped(&keyboard, true, stamp), true);
@@ -942,7 +946,7 @@ impl KeychronWorker {
                         Outcome::Stopped => return,
                         Outcome::Disabled => pause = Duration::ZERO,
                         Outcome::Lost(reason) => {
-                            eprintln!("myhub: keyboard link lost: {reason}");
+                            log_line!("myhub: keyboard link lost: {reason}");
                             self.publish(self.stamped(&keyboard, false, stamp), false);
                             // A session that lasted is a success; a quick loss backs off.
                             failures = if started.elapsed() >= HEALTHY_SESSION {
@@ -954,17 +958,21 @@ impl KeychronWorker {
                         }
                     }
                 }
-                Err(ConnectError::Absent) => last_error = None,
+                Err(ConnectError::Absent) => {
+                    last_error = None;
+                    access::report_open(&self.app, "keychron", None);
+                }
                 Err(ConnectError::Foreign) => {
                     if last_error.as_deref() != Some("foreign") {
-                        eprintln!("myhub: keyboard busy: another program is talking to it");
+                        log_line!("myhub: keyboard busy: another program is talking to it");
                         last_error = Some("foreign".to_owned());
                     }
                     pause = FOREIGN_CONNECT_WAIT;
                 }
                 Err(ConnectError::Failed(message)) => {
+                    access::report_open(&self.app, "keychron", Some(&message));
                     if last_error.as_deref() != Some(message.as_str()) {
-                        eprintln!("myhub: keyboard not connected: {message}");
+                        log_line!("myhub: keyboard not connected: {message}");
                         last_error = Some(message);
                     }
                     failures += 1;
@@ -985,7 +993,7 @@ impl KeychronWorker {
         if let Some(dir) = self.config_dir.as_deref()
             && let Err(e) = fresh.save(&cache_path(dir))
         {
-            eprintln!("myhub: keyboard cache not written: {:?}", e.kind());
+            log_line!("myhub: keyboard cache not written: {:?}", e.kind());
         }
         *cache = Some(fresh);
     }
@@ -1128,8 +1136,12 @@ impl KeychronWorker {
         last_error: &mut Option<String>,
     ) -> ReceiverEnd {
         let mut session = match Session::open_receiver() {
-            Ok(session) => session,
+            Ok(session) => {
+                access::report_open(&self.app, "keychron", None);
+                session
+            }
             Err(SessionError::ReceiverNotFound) => {
+                access::report_open(&self.app, "keychron", None);
                 return ReceiverEnd::Retry(hotplug::scan_interval(IDLE_SCAN_INTERVAL));
             }
             Err(other) => return self.receiver_failed(other.to_string(), last_error),
@@ -1143,7 +1155,7 @@ impl KeychronWorker {
             ) => {
                 let message = "receiver busy: another program is talking to it".to_owned();
                 if last_error.as_deref() != Some(message.as_str()) {
-                    eprintln!("myhub: {message}");
+                    log_line!("myhub: {message}");
                     *last_error = Some(message);
                 }
                 return ReceiverEnd::Retry(FOREIGN_CONNECT_WAIT);
@@ -1152,7 +1164,7 @@ impl KeychronWorker {
         };
         *last_error = None;
         let mut link = Link::new(session, &first, Instant::now());
-        eprintln!("myhub: keyboard receiver opened, linked: {}", link.linked);
+        log_line!("myhub: keyboard receiver opened, linked: {}", link.linked);
         let mut stamp = clock_ms();
         if let Some(detail) = self.receiver_detail(&link, cache, stamp) {
             self.publish(detail, true);
@@ -1187,7 +1199,7 @@ impl KeychronWorker {
                     dirty |= changed;
                 }
                 Err(reason) => {
-                    eprintln!("myhub: keyboard receiver lost: {reason}");
+                    log_line!("myhub: keyboard receiver lost: {reason}");
                     stamp = clock_ms();
                     answer_all(replies, self.mark_gone(&link, cache, stamp));
                     return ReceiverEnd::Retry(RECONNECT_PAUSE);
@@ -1201,7 +1213,7 @@ impl KeychronWorker {
                     return ReceiverEnd::Retry(Duration::ZERO);
                 }
                 if !found.receiver {
-                    eprintln!("myhub: keyboard receiver unplugged");
+                    log_line!("myhub: keyboard receiver unplugged");
                     stamp = clock_ms();
                     answer_all(replies, self.mark_gone(&link, cache, stamp));
                     return ReceiverEnd::Retry(RECONNECT_PAUSE);
@@ -1219,8 +1231,9 @@ impl KeychronWorker {
     }
 
     fn receiver_failed(&self, message: String, last_error: &mut Option<String>) -> ReceiverEnd {
+        access::report_open(&self.app, "keychron", Some(&message));
         if last_error.as_deref() != Some(message.as_str()) {
-            eprintln!("myhub: keyboard receiver not usable: {message}");
+            log_line!("myhub: keyboard receiver not usable: {message}");
             *last_error = Some(message);
         }
         self.mark_disconnected();

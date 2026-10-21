@@ -309,3 +309,9 @@ export interface DeviceDetail extends DeviceSummary {
   /** Set for keyboards, null for the other devices. */
   keyboard: KeyboardView | null;
 }
+
+/** A module whose device was found but could not be opened for lack of permission (Linux). */
+export interface AccessIssue {
+  module: "logitech" | "keychron";
+  path?: string;
+}

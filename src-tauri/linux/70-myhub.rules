@@ -1,0 +1,5 @@
+# MyHUB: give the logged-in user access to the hidraw nodes of the supported devices.
+# Logitech LIGHTSPEED receiver
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c547", TAG+="uaccess"
+# Keychron (K2 HE and the Link receiver)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3434", TAG+="uaccess"

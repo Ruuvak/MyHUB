@@ -213,3 +213,15 @@ UI: the HE card edits the ACTIVE profile only (mode Static / Rapid Trigger, actu
 - Logitech: if MyHUB holds the mouse in host mode, the worker first returns it to onboard through the normal return path (no setting needed, prefs are not changed), then drops the session and the HID context.
 - Sony: the RFCOMM session is closed and `list_paired` is not called. Keychron: the USB or receiver session is closed and nothing is enumerated.
 - The hotplug wake does not make a disabled worker scan.
+
+## Linux device access (access.rs)
+- `get_access_issues() -> [{ module: "logitech" | "keychron", path?: string }]` (`path` is never set today: no device path leaves the backend). Event `access-issues-changed` carries the same list whenever it changes. Always empty on Windows.
+- A module is listed when its worker found a matching device but the open failed with a permission error (hidapi text containing "Permission denied" or "os error 13", see `is_permission_error`). The workers keep retrying at the normal pace; the next open that succeeds (or a scan that finds no device) clears the module.
+- `save_udev_rule() -> string` writes the bundled `src-tauri/linux/70-myhub.rules` to the Downloads folder and returns the path; error string on failure.
+- UI: `AccessBanner` above the device list when the list is non-empty: message, the copyable install command and "Save rule file". Demo: `?access=1` (dev only).
+- The .deb installs the rule to /usr/lib/udev/rules.d/70-myhub.rules (`bundle.linux.deb.files`, post-install and post-remove scripts reload udev). AppImage cannot, so it relies on the banner.
+- Linux hotplug: udev monitor on subsystem hidraw (hotplug.rs), same coalescer and ACTIVE flag as Windows.
+
+## Log file (logfile.rs)
+- Backend log lines go through `log_line!` (stderr plus `<app_log_dir>/myhub.log`, UTC timestamp prefix, rotated at 1 MiB to `myhub.1.log`). File lines pass `redact()`: `/dev/hidrawN` becomes `/dev/hidraw*`, a `\\?\` device path becomes `\\?\*`, the home dir becomes `~`. Lines carry no serial numbers or Bluetooth addresses. A panic hook (installed by `logfile::init`) logs the panic message and location.
+- `open_logs_folder() -> void` creates the log dir and opens it in the file manager (explorer, xdg-open, open). Errors: `noLogDir`, `openFailed`. The dev fixture (no Tauri) resolves without doing anything.

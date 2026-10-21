@@ -207,7 +207,7 @@ pub fn show_main_window(app: &AppHandle) {
 fn check_updates_from_tray(app: &AppHandle) {
     show_main_window(app);
     if let Err(e) = app.emit_to(MAIN_WINDOW, CHECK_UPDATES_EVENT, ()) {
-        eprintln!("myhub: cannot emit {CHECK_UPDATES_EVENT}: {e}");
+        log_line!("myhub: cannot emit {CHECK_UPDATES_EVENT}: {e}");
     }
 }
 

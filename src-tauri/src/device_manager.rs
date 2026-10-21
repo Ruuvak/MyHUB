@@ -44,6 +44,7 @@ use myhub_transport::{
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::access;
 use crate::backup;
 use crate::hotplug;
 use crate::keychron::{KeyboardWrite, KeychronCommand, KeychronWorker, TravelModeArg};
@@ -526,7 +527,7 @@ impl DeviceManager {
         let sony_thread = match sony_spawned {
             Ok(handle) => Some((handle, sony_done_rx)),
             Err(e) => {
-                eprintln!("myhub: cannot start the headset worker: {e}");
+                log_line!("myhub: cannot start the headset worker: {e}");
                 None
             }
         };
@@ -551,7 +552,7 @@ impl DeviceManager {
         let keychron_thread = match keychron_spawned {
             Ok(handle) => Some((handle, keychron_done_rx)),
             Err(e) => {
-                eprintln!("myhub: cannot start the keyboard worker: {e}");
+                log_line!("myhub: cannot start the keyboard worker: {e}");
                 None
             }
         };
@@ -578,7 +579,7 @@ impl DeviceManager {
         let thread = match spawned {
             Ok(handle) => Some((handle, done_rx)),
             Err(e) => {
-                eprintln!("myhub: cannot start the device manager: {e}");
+                log_line!("myhub: cannot start the device manager: {e}");
                 None
             }
         };
@@ -741,7 +742,7 @@ impl DeviceManager {
             (&self.sony_write_in_flight, "headset"),
         ] {
             if !wait_for_flash(flag, end.saturating_duration_since(Instant::now())) {
-                eprintln!("myhub: a {what} write is still running after {FLASH_SHUTDOWN_WAIT:?}");
+                log_line!("myhub: a {what} write is still running after {FLASH_SHUTDOWN_WAIT:?}");
             }
         }
         self.router.wake_all();
@@ -766,7 +767,7 @@ fn join_worker(thread: &Mutex<Option<(JoinHandle<()>, Receiver<()>)>>, wait: Dur
                 let _ = handle.join();
             }
             Err(RecvTimeoutError::Timeout) => {
-                eprintln!("myhub: {name} did not stop in time");
+                log_line!("myhub: {name} did not stop in time");
             }
         }
     }
@@ -1010,7 +1011,7 @@ fn classify_save_error(e: SaveError) -> WriteFailure {
         SaveError::Reselect {
             cause, active_now, ..
         } => {
-            eprintln!(
+            log_line!(
                 "myhub: the profile was written but reloading it failed: {cause} (active now: {active_now:?})"
             );
             match active_now {
@@ -1223,7 +1224,7 @@ fn update_prefs(path: &Path, change: impl FnOnce(&mut DevicePrefs)) {
     let mut prefs = settings::load_prefs(path).unwrap_or_default();
     change(&mut prefs);
     if let Err(e) = settings::save_prefs(path, &prefs) {
-        eprintln!("myhub: cannot save device prefs {}: {e}", path.display());
+        log_line!("myhub: cannot save device prefs {}: {e}", path.display());
     }
 }
 
@@ -1416,13 +1417,13 @@ impl<L: HidLink> Device<L> {
         match self.session.request_button_spy(true) {
             Ok(_) => {
                 self.set_spy_active(true);
-                eprintln!("myhub: button spy started (DPI buttons active)");
+                log_line!("myhub: button spy started (DPI buttons active)");
                 Ok(())
             }
             Err(SessionError::Link(e)) => Err(LinkLost(e.to_string())),
             Err(e) => {
                 self.set_spy_active(false);
-                eprintln!(
+                log_line!(
                     "myhub: could not start the button spy, the DPI buttons will not work: {e}"
                 );
                 Ok(())
@@ -1451,7 +1452,7 @@ impl<L: HidLink> Device<L> {
             Ok(reply) => {
                 self.spy_stale.store(false, Ordering::SeqCst);
                 let hex: String = reply.iter().map(|b| format!("{b:02x}")).collect();
-                eprintln!("myhub: button spy stopped (0x8110 fn2 reply {hex})");
+                log_line!("myhub: button spy stopped (0x8110 fn2 reply {hex})");
                 Ok(())
             }
             Err(e) => {
@@ -1460,7 +1461,7 @@ impl<L: HidLink> Device<L> {
                 if let SessionError::Link(link) = e {
                     return Err(LinkLost(link.to_string()));
                 }
-                eprintln!("myhub: could not stop the button spy (will retry): {e}");
+                log_line!("myhub: could not stop the button spy (will retry): {e}");
                 Ok(())
             }
         }
@@ -1495,7 +1496,7 @@ impl<L: HidLink> Device<L> {
         let Some(levels) = levels.filter(|l| !l.is_empty()) else {
             if !self.spy_unknown_logged {
                 self.spy_unknown_logged = true;
-                eprintln!(
+                log_line!(
                     "myhub: DPI button pressed but no profile levels are known (ignored, logged once)"
                 );
             }
@@ -1539,7 +1540,7 @@ impl<L: HidLink> Device<L> {
             Ok(()) => Ok(()),
             Err(WriteFailure::Lost(lost)) => Err(lost),
             Err(WriteFailure::Refused(code)) => {
-                eprintln!("myhub: DPI button target {target} not applied: {code}");
+                log_line!("myhub: DPI button target {target} not applied: {code}");
                 Ok(())
             }
         }
@@ -1619,7 +1620,7 @@ impl<L: HidLink> Device<L> {
                 if self.host_by_us() && snapshot_mode_byte(&snapshot) == Some(1) {
                     // Observation: the mouse is onboard again after a
                     // reconnect, so the host mode set by MyHUB is volatile.
-                    eprintln!(
+                    log_line!(
                         "myhub: observation: the mouse is back in onboard mode after a reconnect; the host mode MyHUB set did not survive"
                     );
                     self.set_host_by_us(false);
@@ -1645,7 +1646,7 @@ impl<L: HidLink> Device<L> {
             Err(ReadError::Session(SessionError::Link(e))) => Err(LinkLost(e.to_string())),
             Err(e) => {
                 // 0x08 (unknown device) is expected while the mouse is off.
-                eprintln!("myhub: device read failed: {e}");
+                log_line!("myhub: device read failed: {e}");
                 self.read_failures = self.read_failures.saturating_add(1);
                 self.next_read = now + retry_delay(self.read_failures);
                 Ok(false)
@@ -1786,7 +1787,7 @@ impl<L: HidLink> Device<L> {
             other => {
                 if !self.unknown_event_logged {
                     self.unknown_event_logged = true;
-                    eprintln!(
+                    log_line!(
                         "myhub: unknown 0x8100 event fn{other}, payload {:02x?} (ignored, logged once)",
                         &payload[..4]
                     );
@@ -1885,7 +1886,7 @@ impl<L: HidLink> Device<L> {
         if let (Ok(dpi), Some(snapshot)) = (&dpi, self.snapshot.as_mut()) {
             match hidpp::dpi::parse_sensor_dpi(dpi) {
                 Ok(current) => snapshot.dpi.current = current.current,
-                Err(e) => eprintln!("myhub: confirm read: DPI reply not understood: {e}"),
+                Err(e) => log_line!("myhub: confirm read: DPI reply not understood: {e}"),
             }
         }
         if let (Ok(active), Some(snapshot)) = (&active, self.snapshot.as_mut()) {
@@ -1895,7 +1896,7 @@ impl<L: HidLink> Device<L> {
         }
         for reply in [&dpi, &active] {
             if let Err(e) = reply {
-                eprintln!("myhub: confirm read failed: {e}");
+                log_line!("myhub: confirm read failed: {e}");
             }
         }
         self.apply_host_overlay();
@@ -1933,11 +1934,11 @@ impl<L: HidLink> Device<L> {
         match reply {
             Ok(payload) => match parse_battery_status(&payload) {
                 Some(status) => self.set_battery_status(status, &payload),
-                None => eprintln!("myhub: battery reply not understood"),
+                None => log_line!("myhub: battery reply not understood"),
             },
             Err(SessionError::Link(e)) => return Err(LinkLost(e.to_string())),
             // The mouse went away between two notifications; the 0x41 follows.
-            Err(e) => eprintln!("myhub: battery refresh failed: {e}"),
+            Err(e) => log_line!("myhub: battery refresh failed: {e}"),
         }
         Ok(())
     }
@@ -2222,7 +2223,7 @@ impl<L: HidLink> Device<L> {
             return Ok(());
         }
         if !self.link_up || self.link_known_down() || self.session.needs_rediscovery() {
-            eprintln!("myhub: not returning the mouse to onboard mode: it is not reachable (yet)");
+            log_line!("myhub: not returning the mouse to onboard mode: it is not reachable (yet)");
             return Ok(());
         }
         // The spy goes first (always sent), then the switch back.
@@ -2238,7 +2239,7 @@ impl<L: HidLink> Device<L> {
         match result {
             Ok(_) => {
                 self.apply_mode(1);
-                eprintln!("myhub: returned the mouse to onboard mode");
+                log_line!("myhub: returned the mouse to onboard mode");
                 Ok(())
             }
             Err(e) => {
@@ -2263,7 +2264,7 @@ impl<L: HidLink> Device<L> {
                 if let WriteError::Session(SessionError::Link(link)) = e {
                     return Err(LinkLost(link.to_string()));
                 }
-                eprintln!("myhub: could not return the mouse to onboard mode: {e}");
+                log_line!("myhub: could not return the mouse to onboard mode: {e}");
                 Ok(())
             }
         }
@@ -2481,7 +2482,7 @@ impl<L: HidLink> Device<L> {
         match result {
             Ok(report) => {
                 let log = &report.write.log;
-                eprintln!(
+                log_line!(
                     "myhub: saved profile sector {:#06x}: {:?}; fn6 {:?}; fn7 {:?}; fn8 {:?}; reselect {:?}; reloaded {}; reload fn3 {:?}; backup {:?}",
                     report.sector,
                     report.write.outcome,
@@ -2501,7 +2502,7 @@ impl<L: HidLink> Device<L> {
                 })
             }
             Err(e) => {
-                eprintln!("myhub: saving the profile failed: {e}");
+                log_line!("myhub: saving the profile failed: {e}");
                 Err(classify_save_error(e))
             }
         }
@@ -2538,7 +2539,7 @@ fn supervise<T>(
         }
         on_panic(ctx);
         if restarts >= MAX_RESTARTS {
-            eprintln!("myhub: the device manager keeps failing, stopping it");
+            log_line!("myhub: the device manager keeps failing, stopping it");
             return true;
         }
         restarts += 1;
@@ -2556,7 +2557,7 @@ fn return_blind<L: HidLink>(device: &mut Device<L>) -> Result<(), LinkLost> {
         return Ok(());
     }
     if let Err(e) = device.session.discover() {
-        eprintln!("myhub: cannot return the mouse to onboard mode: discovery failed: {e}");
+        log_line!("myhub: cannot return the mouse to onboard mode: discovery failed: {e}");
         return Ok(());
     }
     // The mark says the mouse was in host mode and discovery just worked.
@@ -2586,7 +2587,7 @@ fn park_step<L: HidLink>(device: &mut Option<Device<L>>) -> bool {
     if d.link_known_down() {
         d.park_tried = false;
         if let Err(e) = listen(d) {
-            eprintln!("myhub: link lost while switching the module off: {e}");
+            log_line!("myhub: link lost while switching the module off: {e}");
             *device = None;
             return false;
         }
@@ -2594,7 +2595,7 @@ fn park_step<L: HidLink>(device: &mut Option<Device<L>>) -> bool {
     }
     if d.park_tried && !d.session.needs_rediscovery() {
         if let Err(e) = listen(d) {
-            eprintln!("myhub: link lost while switching the module off: {e}");
+            log_line!("myhub: link lost while switching the module off: {e}");
             *device = None;
             return false;
         }
@@ -2604,13 +2605,13 @@ fn park_step<L: HidLink>(device: &mut Option<Device<L>>) -> bool {
     d.park_tried = true;
     if d.session.needs_rediscovery() {
         if let Err(e) = d.session.discover() {
-            eprintln!("myhub: cannot return the mouse to onboard mode yet: discovery failed: {e}");
+            log_line!("myhub: cannot return the mouse to onboard mode yet: discovery failed: {e}");
             return true;
         }
         d.link_up = true;
     }
     if let Err(LinkLost(reason)) = d.return_to_onboard() {
-        eprintln!("myhub: link lost while switching the module off: {reason}");
+        log_line!("myhub: link lost while switching the module off: {reason}");
         *device = None;
         return false;
     }
@@ -2773,7 +2774,7 @@ impl Worker {
             Instant::now(),
         )?;
         for line in lines {
-            eprintln!("myhub: {line}");
+            log_line!("myhub: {line}");
         }
         Ok(())
     }
@@ -2793,7 +2794,7 @@ impl Worker {
             &mut self,
             |worker| worker.run_loop(),
             |worker| {
-                eprintln!("myhub: the device manager panicked");
+                log_line!("myhub: the device manager panicked");
                 worker.publish(None, true);
             },
             |worker| {
@@ -2818,15 +2819,15 @@ impl Worker {
         let attempt = panic::catch_unwind(AssertUnwindSafe(|| match self.try_open() {
             Some(mut device) => {
                 if let Err(LinkLost(reason)) = return_blind(&mut device) {
-                    eprintln!("myhub: link lost while returning to onboard mode: {reason}");
+                    log_line!("myhub: link lost while returning to onboard mode: {reason}");
                 }
             }
-            None => eprintln!(
+            None => log_line!(
                 "myhub: could not reopen the receiver to return the mouse to onboard mode"
             ),
         }));
         if attempt.is_err() {
-            eprintln!("myhub: the return to onboard mode panicked");
+            log_line!("myhub: the return to onboard mode panicked");
         }
     }
 
@@ -2839,6 +2840,7 @@ impl Worker {
                 if self.published() {
                     self.publish(None, true);
                 }
+                access::report_open(&self.app, "logitech", None);
                 if park_step(&mut device) {
                     // The mouse is still marked host and unreachable: keep the
                     // session and only listen for the link coming back.
@@ -2861,7 +2863,7 @@ impl Worker {
                 continue;
             };
             if let Err(LinkLost(reason)) = self.serve(connected) {
-                eprintln!("myhub: receiver link lost: {reason}");
+                log_line!("myhub: receiver link lost: {reason}");
                 device = None;
                 self.publish(None, true);
             }
@@ -2871,7 +2873,7 @@ impl Worker {
         if let Some(connected) = device.as_mut()
             && let Err(LinkLost(reason)) = connected.return_to_onboard()
         {
-            eprintln!("myhub: receiver link lost while shutting down: {reason}");
+            log_line!("myhub: receiver link lost while shutting down: {reason}");
         }
     }
 
@@ -3133,20 +3135,25 @@ impl Worker {
             match HidApi::new() {
                 Ok(api) => self.api = Some(api),
                 Err(e) => {
-                    eprintln!("myhub: hidapi unavailable: {e}");
+                    log_line!("myhub: hidapi unavailable: {e}");
                     return None;
                 }
             }
         }
         let api = self.api.as_mut()?;
         if let Err(e) = api.refresh_devices() {
-            eprintln!("myhub: cannot enumerate HID devices: {e}");
+            log_line!("myhub: cannot enumerate HID devices: {e}");
             return None;
         }
         let receivers = find_receivers(api);
-        let receiver = receivers.first()?;
+        let Some(receiver) = receivers.first() else {
+            // Unplugged: an old access issue no longer applies.
+            access::report_open(&self.app, "logitech", None);
+            return None;
+        };
         match HidapiSession::open(api, receiver) {
             Ok(session) => {
+                access::report_open(&self.app, "logitech", None);
                 let mark = Arc::clone(self.host_marks.entry(DEVICE_ID.to_owned()).or_default());
                 let spy = Arc::clone(self.spy_marks.entry(DEVICE_ID.to_owned()).or_default());
                 let stale = Arc::clone(self.spy_stales.entry(DEVICE_ID.to_owned()).or_default());
@@ -3160,7 +3167,8 @@ impl Worker {
                 )
             }
             Err(e) => {
-                eprintln!("myhub: cannot open the receiver: {e}");
+                log_line!("myhub: cannot open the receiver: {e}");
+                access::report_open(&self.app, "logitech", Some(&e.to_string()));
                 None
             }
         }
@@ -3206,13 +3214,13 @@ pub(crate) fn publish_slot(
     if change.summaries
         && let Err(e) = app.emit(DEVICES_CHANGED_EVENT, &summaries)
     {
-        eprintln!("myhub: cannot emit {DEVICES_CHANGED_EVENT}: {e}");
+        log_line!("myhub: cannot emit {DEVICES_CHANGED_EVENT}: {e}");
     }
     if let Some(detail) = detail.as_ref()
         && (change.detail || force)
         && let Err(e) = app.emit(DEVICE_DETAIL_CHANGED_EVENT, detail)
     {
-        eprintln!("myhub: cannot emit {DEVICE_DETAIL_CHANGED_EVENT}: {e}");
+        log_line!("myhub: cannot emit {DEVICE_DETAIL_CHANGED_EVENT}: {e}");
     }
     if change.summaries || change.detail {
         update_tray(app, &tray);

@@ -130,7 +130,7 @@ pub async fn install_update(
     if let Err(e) = update.install(bytes) {
         // The device workers are stopped now. Restarting the app brings them back; the
         // user sees the app reopen and can try again later.
-        eprintln!("myhub: update install failed: {e}");
+        log_line!("myhub: update install failed: {e}");
         app.restart();
     }
     // Windows relaunches through the installer; elsewhere the app restarts itself.

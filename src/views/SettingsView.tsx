@@ -1,6 +1,7 @@
 import { WarningCircle } from "@phosphor-icons/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { useT } from "../i18n/useT";
+import { openLogsFolder } from "../lib/ipc";
 import type { LanguageSetting, ThemeSetting } from "../lib/types";
 import { useSettings } from "../state/settings";
 import { Button, Panel, SegmentedControl, Skeleton, SwitchRow } from "../ui";
@@ -9,6 +10,7 @@ import { Button, Panel, SegmentedControl, Skeleton, SwitchRow } from "../ui";
 export function SettingsView() {
   const t = useT();
   const { settings, loadFailed, saveFailed, update, reload } = useSettings();
+  const [logsFailed, setLogsFailed] = useState(false);
 
   const themeOptions: Array<{ value: ThemeSetting; label: string }> = [
     { value: "system", label: t("settings.theme.system") },
@@ -112,6 +114,28 @@ export function SettingsView() {
                 onChange={(restoreLastMode) => update({ restoreLastMode })}
               />
             </div>
+          </Panel>
+
+          <Panel title={t("settings.logs")}>
+            <div className="divide-y divide-border px-4">
+              <ControlRow label={t("settings.logs")}>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setLogsFailed(false);
+                    openLogsFolder().catch(() => setLogsFailed(true));
+                  }}
+                >
+                  {t("settings.logs.open")}
+                </Button>
+              </ControlRow>
+            </div>
+            <p className="px-4 pb-3 text-sm text-text-muted">{t("settings.logs.hint")}</p>
+            {logsFailed ? (
+              <div className="px-4 pb-3">
+                <ErrorLine>{t("settings.logs.error")}</ErrorLine>
+              </div>
+            ) : null}
           </Panel>
         </>
       )}
